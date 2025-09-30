@@ -21,8 +21,9 @@ st.title("Dynamiczny generator harmonogramu — brygady z indywidualnymi godzina
 # -----------------------------
 if "slot_types" not in st.session_state:
     st.session_state.slot_types = [
-        {"name": "Standard", "minutes": 60},
-        {"name": "Premium", "minutes": 120}
+        {"name": "Krótkie zlecenie", "minutes": 30},
+        {"name": "Normalne zlecenie", "minutes": 60},
+        {"name": "Długie zlecenie", "minutes": 90}
     ]
 
 if "brygady" not in st.session_state:
