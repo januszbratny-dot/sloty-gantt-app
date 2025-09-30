@@ -3,6 +3,9 @@
 # Heurystyka: opóźnienie, minimalizacja przerw, RÓWNOMIERNOŚĆ (dzień/tydzień)
 # + Podgląd tygodniowej heatmapy (Pon–Ndz) z wyborem metryki
 
+import sqlite3
+import json
+import os
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -10,15 +13,59 @@ from datetime import datetime, date, timedelta, time
 from typing import List, Dict, Any
 from statistics import pstdev
 
+
+# --- Trwały zapis stanu do SQLite ---
+DB_PATH = "harmonogram.db"
+
+def save_state_to_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY, data TEXT)")
+    data = {
+        "slot_types": st.session_state.slot_types,
+        "brygady": st.session_state.brygady,
+        "working_hours": {k: (v[0].strftime("%H:%M"), v[1].strftime("%H:%M")) for k, v in st.session_state.working_hours.items()},
+        "schedules": st.session_state.schedules,
+        "clients_added": st.session_state.clients_added,
+        "heur_weights": st.session_state.heur_weights,
+        "balance_horizon": st.session_state.balance_horizon,
+    }
+    c.execute("DELETE FROM state")
+    c.execute("INSERT INTO state (data) VALUES (?)", (json.dumps(data),))
+    conn.commit()
+    conn.close()
+
+def load_state_from_db():
+    if not os.path.exists(DB_PATH):
+        return
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY, data TEXT)")
+    c.execute("SELECT data FROM state ORDER BY id DESC LIMIT 1")
+    row = c.fetchone()
+    conn.close()
+    if row:
+        data = json.loads(row[0])
+        st.session_state.slot_types = data.get("slot_types", [])
+        st.session_state.brygady = data.get("brygady", [])
+        st.session_state.working_hours = {k: (time.fromisoformat(v[0]), time.fromisoformat(v[1])) for k, v in data.get("working_hours", {}).items()}
+        st.session_state.schedules = data.get("schedules", {})
+        st.session_state.clients_added = data.get("clients_added", [])
+        st.session_state.heur_weights = data.get("heur_weights", {"delay": 0.5, "gap": 0.3, "balance": 0.2})
+        st.session_state.balance_horizon = data.get("balance_horizon", "week")
+
 # -----------------------------
 # Konfiguracja strony i tytuł
 # -----------------------------
 st.set_page_config(page_title="Sloty Gantt - dynamiczny (heatmapa tygodniowa)", layout="wide")
 st.title("Dynamiczny generator harmonogramu — brygady z indywidualnymi godzinami")
 
-# -----------------------------
-# Inicjalizacja stanu
-# -----------------------------
+
+# --- Inicjalizacja stanu i ładowanie z bazy ---
+if "initialized" not in st.session_state:
+    load_state_from_db()
+    st.session_state.initialized = True
+
 if "slot_types" not in st.session_state:
     st.session_state.slot_types = [
         {"name": "Proste zlecenie", "minutes": 30},
@@ -278,6 +325,7 @@ def schedule_client_immediately(client_name: str, slot_type_name: str, day: date
         "client": client_name
     }
     add_slot_to_brygada(best["brygada"], day, slot)
+    save_state_to_db()  # <-- ZAPISZ PO ZMIANIE
     return True, {"brygada": best["brygada"], "start": best["start"], "end": best["end"]}
 
 # -----------------------------
