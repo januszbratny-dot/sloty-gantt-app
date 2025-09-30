@@ -11,10 +11,6 @@ from typing import List, Dict, Any
 from statistics import pstdev
 
 
-init_db()
-load_from_db()
-
-
 # --- Persistence using SQLite ---
 import sqlite3
 from datetime import datetime as _dt
@@ -746,3 +742,8 @@ st.markdown(
     "- Zakres tygodnia to zawsze Pon–Ndz zawierające wskazaną datę.\n"
     "- Wagi heurystyki i horyzont równomierności (dzień/tydzień) zmienisz w panelu bocznym."
 )
+
+if __name__ == "__main__":
+    init_db()
+    load_from_db()
+    # ewentualnie start aplikacji Streamlit
