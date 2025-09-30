@@ -19,20 +19,20 @@ from datetime import datetime as _dt
 
 DB_PATH = "harmonogram.db"
 
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS sloty (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            brygada TEXT,
-            data TEXT,
-            start TEXT,
-            end TEXT,
-            slot_type TEXT,
-            client TEXT,
-            duration_min INTEGER
-        )
-    """)
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS sloty (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                brygada TEXT,
+                data TEXT,
+                start TEXT,
+                end TEXT,
+                slot_type TEXT,
+                client TEXT,
+                duration_min INTEGER
+            )
+        """)
     c.execute("""
         CREATE TABLE IF NOT EXISTS brygady (
             brygada TEXT PRIMARY KEY,
