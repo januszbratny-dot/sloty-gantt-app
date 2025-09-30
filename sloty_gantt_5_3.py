@@ -14,6 +14,7 @@ DATA_FILE = "dane.json"
 
 
 # ---------- Pomocnicze funkcje do zapisu/odczytu ----------
+
 def save_data():
     """
     Zapisuje aktualny stan istotnych elementów st.session_state do pliku JSON.
@@ -26,9 +27,12 @@ def save_data():
     try:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=4, default=str)
-        st.experimental_set_query_params(_saved=datetime.utcnow().isoformat())  # drobny sygnał
+        # ustawienie query param jako sygnał, że dane zapisano
+        st.query_params["_saved"] = datetime.utcnow().isoformat()
     except Exception as e:
         st.error(f"Błąd zapisu do pliku {DATA_FILE}: {e}")
+
+
 
 
 def load_data():
