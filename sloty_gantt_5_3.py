@@ -1,6 +1,6 @@
 # sloty_gantt_5_3_modified.py
 # Streamlit app — edycja slotów/brygad/typów + trwały zapis do JSON
-# Kod w języku polskim (komentarze). Plik danych: dane.json
+# Dodano: czas wykonania dla typów slotów oraz godziny pracy dla brygad
 
 import streamlit as st
 from datetime import datetime, date, time
@@ -13,8 +13,22 @@ from typing import List, Dict, Any
 DATA_FILE = "dane.json"
 
 
-# ---------- Pomocnicze funkcje do zapisu/odczytu ----------
+# ---------- Utility ----------
+def gen_id(prefix="id"):
+    """Generuje prosty unikalny identyfikator."""
+    return f"{prefix}_{uuid.uuid4().hex[:8]}"
 
+
+def ensure_session_state():
+    """
+    Zapewnia obecność wymaganych kluczy w st.session_state.
+    """
+    st.session_state.setdefault("slot_types", [])   # lista dictów: {id, name, duration_minutes}
+    st.session_state.setdefault("brygady", [])      # lista dictów: {id, name, work_start, work_end}
+    st.session_state.setdefault("slots", [])        # lista dictów: jak wcześniej
+
+
+# ---------- Pomocnicze funkcje do zapisu/odczytu ----------
 def save_data():
     """
     Zapisuje aktualny stan istotnych elementów st.session_state do pliku JSON.
@@ -28,31 +42,88 @@ def save_data():
         with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=4, default=str)
         # ustawienie query param jako sygnał, że dane zapisano
-        st.query_params["_saved"] = datetime.utcnow().isoformat()
+        try:
+            # użytkownik wymagał użycia st.query_params zamiast experimental_set_query_params
+            st.query_params["_saved"] = datetime.utcnow().isoformat()
+        except Exception:
+            # jeśli st.query_params nie pozwala na bezpośrednie przypisanie, ignorujemy (nie krytyczne)
+            pass
     except Exception as e:
         st.error(f"Błąd zapisu do pliku {DATA_FILE}: {e}")
-
-
 
 
 def load_data():
     """
     Wczytuje dane z pliku JSON do st.session_state, jeśli plik istnieje.
+    Normalizuje stare formaty: akceptuje slot_types jako listę stringów albo listę dictów;
+    similarly dla brygad.
     """
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            # Ustaw domyślne struktury w session_state
-            st.session_state["slot_types"] = data.get("slot_types", [])
-            st.session_state["brygady"] = data.get("brygady", [])
-            st.session_state["slots"] = data.get("slots", [])
         except Exception as e:
             st.error(f"Błąd odczytu pliku {DATA_FILE}: {e}")
             # safety: inicjalizuj puste struktury
             st.session_state.setdefault("slot_types", [])
             st.session_state.setdefault("brygady", [])
             st.session_state.setdefault("slots", [])
+            return
+
+        # Normalizacja typów slotów
+        raw_slot_types = data.get("slot_types", [])
+        normalized_slot_types = []
+        for t in raw_slot_types:
+            if isinstance(t, str):
+                normalized_slot_types.append({
+                    "id": gen_id("typ"),
+                    "name": t,
+                    "duration_minutes": None
+                })
+            elif isinstance(t, dict):
+                normalized_slot_types.append({
+                    "id": t.get("id", gen_id("typ")),
+                    "name": t.get("name", ""),
+                    "duration_minutes": t.get("duration_minutes", None)
+                })
+        st.session_state["slot_types"] = normalized_slot_types
+
+        # Normalizacja brygad
+        raw_brygady = data.get("brygady", [])
+        normalized_brygady = []
+        for b in raw_brygady:
+            if isinstance(b, str):
+                normalized_brygady.append({
+                    "id": gen_id("bry"),
+                    "name": b,
+                    "work_start": None,
+                    "work_end": None
+                })
+            elif isinstance(b, dict):
+                normalized_brygady.append({
+                    "id": b.get("id", gen_id("bry")),
+                    "name": b.get("name", ""),
+                    "work_start": b.get("work_start", None),
+                    "work_end": b.get("work_end", None)
+                })
+        st.session_state["brygady"] = normalized_brygady
+
+        # slots: pozostaw jak są (ale zapewnij domyślne pola)
+        raw_slots = data.get("slots", [])
+        normalized_slots = []
+        for s in raw_slots:
+            if isinstance(s, dict):
+                # ensure keys exist
+                normalized_slots.append({
+                    "id": s.get("id", gen_id("slot")),
+                    "name": s.get("name", ""),
+                    "start": s.get("start", ""),
+                    "end": s.get("end", ""),
+                    "type": s.get("type", None),
+                    "brygada_id": s.get("brygada_id", None)
+                })
+        st.session_state["slots"] = normalized_slots
+
     else:
         # Plik nie istnieje — inicjalizuj puste struktury
         st.session_state.setdefault("slot_types", [])
@@ -60,32 +131,24 @@ def load_data():
         st.session_state.setdefault("slots", [])
 
 
-# ---------- Utility ----------
-def ensure_session_state():
-    """
-    Zapewnia obecność wymaganych kluczy w st.session_state.
-    """
-    st.session_state.setdefault("slot_types", [])
-    st.session_state.setdefault("brygady", [])
-    st.session_state.setdefault("slots", [])
-
-
-def gen_id(prefix="id"):
-    """Generuje prosty unikalny identyfikator."""
-    return f"{prefix}_{uuid.uuid4().hex[:8]}"
-
-
 # ---------- Operacje na danych (wrappers które zapisują) ----------
-def add_slot_type(name: str):
-    name = name.strip()
+def add_slot_type(name: str, duration_minutes: int = None):
+    name = (name or "").strip()
     if not name:
+        st.warning("Nazwa typu jest wymagana.")
         return
     # unikaj duplikatów (case-insensitive)
-    existing = [s.lower() for s in st.session_state.slot_types]
+    existing = [t.get("name", "").lower() for t in st.session_state.slot_types]
     if name.lower() in existing:
         st.warning("Taki typ już istnieje.")
         return
-    st.session_state.slot_types.append(name)
+    duration = None
+    try:
+        duration = int(duration_minutes) if duration_minutes and int(duration_minutes) > 0 else None
+    except Exception:
+        duration = None
+    t = {"id": gen_id("typ"), "name": name, "duration_minutes": duration}
+    st.session_state.slot_types.append(t)
     save_data()
     st.success(f"Dodano typ: {name}")
 
@@ -93,25 +156,32 @@ def add_slot_type(name: str):
 def remove_slot_type(index: int):
     try:
         removed = st.session_state.slot_types.pop(index)
+        removed_name = removed.get("name") if isinstance(removed, dict) else str(removed)
         # usuń referencje w slotach, jeśli potrzebne (ustaw na None)
         for s in st.session_state.slots:
-            if s.get("type") == removed:
+            if s.get("type") == removed_name:
                 s["type"] = None
         save_data()
-        st.info(f"Usunięto typ: {removed}")
+        st.info(f"Usunięto typ: {removed_name}")
     except Exception as e:
         st.error(f"Błąd usuwania typu: {e}")
 
 
-def add_brygada(name: str):
-    name = name.strip()
+def add_brygada(name: str, work_start: str = None, work_end: str = None):
+    name = (name or "").strip()
     if not name:
+        st.warning("Nazwa brygady jest wymagana.")
         return
     existing = [b.get("name", "").lower() for b in st.session_state.brygady]
     if name.lower() in existing:
         st.warning("Taka brygada już istnieje.")
         return
-    b = {"id": gen_id("bry"), "name": name}
+    b = {
+        "id": gen_id("bry"),
+        "name": name,
+        "work_start": work_start,  # "HH:MM" lub None
+        "work_end": work_end
+    }
     st.session_state.brygady.append(b)
     save_data()
     st.success(f"Dodano brygadę: {name}")
@@ -138,7 +208,6 @@ def add_slot(name: str, start_date: str, end_date: str, slot_type: str = None, b
         st.warning("Nazwa slotu jest wymagana.")
         return
     try:
-        # prosta walidacja dat
         sd_obj = datetime.fromisoformat(start_date).date() if isinstance(start_date, str) else start_date
         ed_obj = datetime.fromisoformat(end_date).date() if isinstance(end_date, str) else end_date
         if sd_obj > ed_obj:
@@ -187,16 +256,25 @@ def sidebar_manage_types():
     st.sidebar.header("Typy slotów")
     with st.sidebar.form("form_add_type", clear_on_submit=True):
         new_type = st.text_input("Nazwa typu", key="input_new_type")
+        # czas wykonania w minutach (opcjonalnie)
+        duration = st.number_input("Czas wykonania (minuty, opcjonalnie)", min_value=0, step=5, value=0, key="input_type_duration")
         submitted = st.form_submit_button("Dodaj typ")
         if submitted:
-            add_slot_type(new_type)
+            # traktujemy 0 jako brak wartości
+            dur = None if duration == 0 else int(duration)
+            add_slot_type(new_type, dur)
 
     # Lista typów
     if st.session_state.slot_types:
         st.sidebar.markdown("**Istniejące typy:**")
         for i, t in enumerate(list(st.session_state.slot_types)):
+            name = t.get("name") if isinstance(t, dict) else str(t)
+            duration = t.get("duration_minutes") if isinstance(t, dict) else None
             col1, col2 = st.sidebar.columns([3, 1])
-            col1.write(t)
+            if duration:
+                col1.markdown(f"**{name}** — {duration} min")
+            else:
+                col1.markdown(f"**{name}**")
             if col2.button("Usuń", key=f"del_type_{i}"):
                 remove_slot_type(i)
 
@@ -205,15 +283,26 @@ def sidebar_manage_brygady():
     st.sidebar.header("Brygady")
     with st.sidebar.form("form_add_brygada", clear_on_submit=True):
         new_bry = st.text_input("Nazwa brygady", key="input_new_bry")
+        # godziny pracy — time_input zwraca datetime.time
+        default_start = time(8, 0)
+        default_end = time(16, 0)
+        work_start = st.time_input("Godzina rozpoczęcia pracy (opcjonalnie)", value=default_start, key="input_bry_start")
+        work_end = st.time_input("Godzina zakończenia pracy (opcjonalnie)", value=default_end, key="input_bry_end")
         submitted = st.form_submit_button("Dodaj brygadę")
         if submitted:
-            add_brygada(new_bry)
+            # konwersja do stringu "HH:MM"
+            ws = work_start.strftime("%H:%M") if isinstance(work_start, time) else None
+            we = work_end.strftime("%H:%M") if isinstance(work_end, time) else None
+            add_brygada(new_bry, ws, we)
 
     if st.session_state.brygady:
         st.sidebar.markdown("**Lista brygad:**")
         for b in list(st.session_state.brygady):
+            b_name = b.get("name")
+            ws = b.get("work_start") or "-"
+            we = b.get("work_end") or "-"
             col1, col2 = st.sidebar.columns([3, 1])
-            col1.write(b.get("name"))
+            col1.markdown(f"**{b_name}** — {ws}–{we}")
             if col2.button("Usuń", key=f"del_bry_{b.get('id')}"):
                 remove_brygada(b.get("id"))
 
@@ -225,7 +314,6 @@ def main():
 
     # Inicjalizacja i wczytanie danych
     ensure_session_state()
-    # Jeżeli jeszcze nie wczytano danych (np. pierwszy run w tej sesji), załaduj
     if "loaded_from_file" not in st.session_state:
         load_data()
         st.session_state["loaded_from_file"] = True
@@ -245,12 +333,15 @@ def main():
             today = date.today()
             start_date = st.date_input("Data rozpoczęcia", value=today, key="start_date")
             end_date = st.date_input("Data zakończenia", value=today, key="end_date")
-            # wybór typu
+            # wybór typu — teraz typy są dictami, więc pokazujemy nazwy
             slot_type = None
             if st.session_state.slot_types:
-                slot_type = st.selectbox("Typ slotu", options=[""] + st.session_state.slot_types, index=0, key="slot_type")
-                if slot_type == "":
+                type_names = [t.get("name") for t in st.session_state.slot_types]
+                slot_type_selected = st.selectbox("Typ slotu", options=[""] + type_names, index=0, key="slot_type")
+                if slot_type_selected == "":
                     slot_type = None
+                else:
+                    slot_type = slot_type_selected
             else:
                 st.info("Brak zdefiniowanych typów. Dodaj w pasku bocznym.")
 
@@ -329,7 +420,7 @@ def main():
                             new_start = st.date_input("Start", value=date.today(), key=f"estart_{s.get('id')}")
                             new_end = st.date_input("End", value=date.today(), key=f"eend_{s.get('id')}")
                         # typ
-                        type_options = [""] + st.session_state.slot_types if st.session_state.slot_types else [""]
+                        type_options = [""] + [t.get("name") for t in st.session_state.slot_types] if st.session_state.slot_types else [""]
                         current_type = s.get("type") or ""
                         new_type = st.selectbox("Typ", options=type_options, index=type_options.index(current_type) if current_type in type_options else 0, key=f"etype_{s.get('id')}")
                         if new_type == "":
