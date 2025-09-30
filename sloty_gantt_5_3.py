@@ -11,8 +11,6 @@ from typing import List, Dict, Any
 from statistics import pstdev
 
 
-init_db()
-load_from_db()
 
 
 # --- Persistence using SQLite ---
@@ -21,7 +19,6 @@ from datetime import datetime as _dt
 
 DB_PATH = "harmonogram.db"
 
-def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("""
@@ -66,7 +63,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-def load_from_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
@@ -746,3 +742,9 @@ st.markdown(
     "- Zakres tygodnia to zawsze Pon–Ndz zawierające wskazaną datę.\n"
     "- Wagi heurystyki i horyzont równomierności (dzień/tydzień) zmienisz w panelu bocznym."
 )
+
+if __name__ == "__main__":
+    init_db()
+    load_from_db()
+    def init_db():
+    def load_from_db():
