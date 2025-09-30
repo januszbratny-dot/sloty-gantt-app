@@ -26,10 +26,13 @@ if "slot_types" not in st.session_state:
     ]
 
 if "brygady" not in st.session_state:
-    st.session_state.brygady = []  # lista nazw brygad
+    st.session_state.brygady = ['Brygada 1', 'Brygada 2', 'Brygada 3']  # lista nazw brygad
 
 if "working_hours" not in st.session_state:
     st.session_state.working_hours = {}  # brygada -> (start_time, end_time)
+st.session_state.working_hours["Brygada 1"] = (time(8, 0), time(16, 0))
+st.session_state.working_hours["Brygada 2"] = (time(10, 0), time(18, 0))
+st.session_state.working_hours["Brygada 3"] = (time(12, 0), time(20, 0))
 
 if "schedules" not in st.session_state:
     # schedules: brygada -> dict(date_str -> list of slots)
