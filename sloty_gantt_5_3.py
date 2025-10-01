@@ -49,10 +49,19 @@ def load_state_from_json(filename="schedules.json"):
 
     st.session_state.slot_types = data.get("slot_types", [])
     st.session_state.brygady = data.get("brygady", [])
+    from datetime import time
+
+    def parse_time_str(t):
+        try:
+            return datetime.fromisoformat(t).time()
+        except ValueError:
+            return datetime.strptime(t, "%H:%M:%S").time() if ":" in t else datetime.strptime(t, "%H:%M").time()
+
     st.session_state.working_hours = {
-        b: (datetime.fromisoformat(wh[0]).time(), datetime.fromisoformat(wh[1]).time())
+        b: (parse_time_str(wh[0]), parse_time_str(wh[1]))
         for b, wh in data.get("working_hours", {}).items()
     }
+
     st.session_state.schedules = {}
     for b, days in data.get("schedules", {}).items():
         st.session_state.schedules[b] = {}
