@@ -1,73 +1,105 @@
-# sloty_gantt_8.py
-# Aplikacja Streamlit — dynamiczny generator harmonogramu
-# Heurystyka: opóźnienie, minimalizacja przerw, RÓWNOMIERNOŚĆ (dzień/tydzień)
-# + Podgląd tygodniowej heatmapy (Pon–Ndz) z wyborem metryki
-
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from datetime import datetime, date, timedelta, time
-from typing import List, Dict, Any
+import numpy as np
+import os
+import json
+from datetime import datetime, timedelta, date, time
 from statistics import pstdev
 
-# -----------------------------
-# Konfiguracja strony i tytuł
-# -----------------------------
-st.set_page_config(page_title="Sloty Gantt - dynamiczny (heatmapa tygodniowa)", layout="wide")
-st.title("Dynamiczny generator harmonogramu — brygady z indywidualnymi godzinami")
+# ===================== PERSISTENCE (JSON) =====================
 
-# -----------------------------
-# Inicjalizacja stanu
-# -----------------------------
-if "slot_types" not in st.session_state:
-    st.session_state.slot_types = [
-        {"name": "Krótkie zlecenie", "minutes": 30},
-        {"name": "Normalne zlecenie", "minutes": 60},
-        {"name": "Długie zlecenie", "minutes": 90}
-    ]
+def schedules_to_jsonable():
+    data = {}
+    for b, days in st.session_state.schedules.items():
+        data[b] = {}
+        for d, slots in days.items():
+            data[b][d] = [
+                {
+                    "start": s["start"].isoformat(),
+                    "end": s["end"].isoformat(),
+                    "slot_type": s["slot_type"],
+                    "duration_min": s["duration_min"],
+                    "client": s["client"],
+                }
+                for s in slots
+            ]
+    return {
+        "slot_types": st.session_state.slot_types,
+        "brygady": st.session_state.brygady,
+        "working_hours": {
+            b: (wh[0].isoformat(), wh[1].isoformat())
+            for b, wh in st.session_state.working_hours.items()
+        },
+        "schedules": data,
+        "clients_added": st.session_state.clients_added,
+        "heur_weights": st.session_state.heur_weights,
+        "balance_horizon": st.session_state.balance_horizon,
+    }
 
-if "brygady" not in st.session_state:
-    st.session_state.brygady = ['Brygada 1', 'Brygada 2', 'Brygada 3']  # lista nazw brygad
+def save_state_to_json(filename="schedules.json"):
+    with open(filename, "w", encoding="utf-8") as f:
+        json.dump(schedules_to_jsonable(), f, ensure_ascii=False, indent=2)
 
-if "working_hours" not in st.session_state:
-    st.session_state.working_hours = {}  # brygada -> (start_time, end_time)
-st.session_state.working_hours["Brygada 1"] = (time(8, 0), time(16, 0))
-st.session_state.working_hours["Brygada 2"] = (time(10, 0), time(18, 0))
-st.session_state.working_hours["Brygada 3"] = (time(12, 0), time(20, 0))
+def load_state_from_json(filename="schedules.json"):
+    if not os.path.exists(filename):
+        return False
+    with open(filename, "r", encoding="utf-8") as f:
+        data = json.load(f)
 
-if "schedules" not in st.session_state:
-    # schedules: brygada -> dict(date_str -> list of slots)
-    # slot: {"start": datetime, "end": datetime, "slot_type": str, "duration_min": int, "client": str}
+    st.session_state.slot_types = data.get("slot_types", [])
+    st.session_state.brygady = data.get("brygady", [])
+    st.session_state.working_hours = {
+        b: (datetime.fromisoformat(wh[0]).time(), datetime.fromisoformat(wh[1]).time())
+        for b, wh in data.get("working_hours", {}).items()
+    }
     st.session_state.schedules = {}
+    for b, days in data.get("schedules", {}).items():
+        st.session_state.schedules[b] = {}
+        for d, slots in days.items():
+            st.session_state.schedules[b][d] = [
+                {
+                    "start": datetime.fromisoformat(s["start"]),
+                    "end": datetime.fromisoformat(s["end"]),
+                    "slot_type": s["slot_type"],
+                    "duration_min": s["duration_min"],
+                    "client": s["client"],
+                }
+                for s in slots
+            ]
+    st.session_state.clients_added = data.get("clients_added", [])
+    st.session_state.heur_weights = data.get("heur_weights", {"delay": 0.34, "gap": 0.33, "balance": 0.33})
+    st.session_state.balance_horizon = data.get("balance_horizon", "week")
+    return True
 
-if "clients_added" not in st.session_state:
-    st.session_state.clients_added = []  # historia dodawania
+# ===================== INICJALIZACJA STANU =====================
 
-# Wagi heurystyki (delay/gap/balance)
-if "heur_weights" not in st.session_state:
-    st.session_state.heur_weights = {"delay": 0.5, "gap": 0.3, "balance": 0.2}
+if "slot_types" not in st.session_state:
+    if not load_state_from_json():
+        st.session_state.slot_types = [{"name": "Standard", "minutes": 60}]
+        st.session_state.brygady = ["Brygada 1", "Brygada 2"]
+        st.session_state.working_hours = {}
+        st.session_state.schedules = {}
+        st.session_state.clients_added = []
+        st.session_state.heur_weights = {"delay": 0.34, "gap": 0.33, "balance": 0.33}
+        st.session_state.balance_horizon = "week"
 
-# Horyzont równomierności: "week" (domyślnie) lub "day"
-if "balance_horizon" not in st.session_state:
-    st.session_state.balance_horizon = "week"
+# ===================== FUNKCJE POMOCNICZE =====================
 
-# -----------------------------
-# Funkcje pomocnicze
-# -----------------------------
-def parse_slot_types(text: str) -> List[Dict[str, Any]]:
+def parse_slot_types(text):
     out = []
     for line in text.splitlines():
-        if not line.strip():
+        line = line.strip()
+        if not line:
             continue
-        if "," not in line:
-            continue
-        try:
-            name, mins = line.split(",", 1)
-            out.append({"name": name.strip(), "minutes": int(mins.strip())})
-        except Exception:
-            continue
+        parts = line.split(",")
+        if len(parts) >= 2:
+            try:
+                minutes = int(parts[1])
+                out.append({"name": parts[0].strip(), "minutes": minutes})
+            except:
+                pass
     return out
-
 
 def ensure_brygady_in_state(brygady_list):
     for b in brygady_list:
@@ -76,457 +108,213 @@ def ensure_brygady_in_state(brygady_list):
         if b not in st.session_state.schedules:
             st.session_state.schedules[b] = {}
 
+def get_day_slots_for_brygada(brygada, day):
+    d = day.strftime("%Y-%m-%d")
+    return sorted(st.session_state.schedules.get(brygada, {}).get(d, []), key=lambda s: s["start"])
 
-def get_day_slots_for_brygada(brygada: str, day: date):
-    ds = st.session_state.schedules.get(brygada, {})
-    return sorted(ds.get(day.strftime("%Y-%m-%d"), []), key=lambda s: s["start"])
-
-
-def add_slot_to_brygada(brygada: str, day: date, slot: Dict[str, Any]):
-    ds = st.session_state.schedules.setdefault(brygada, {})
-    day_key = day.strftime("%Y-%m-%d")
-    lst = ds.setdefault(day_key, [])
+def add_slot_to_brygada(brygada, day, slot):
+    d = day.strftime("%Y-%m-%d")
+    if d not in st.session_state.schedules[brygada]:
+        st.session_state.schedules[brygada][d] = []
+    lst = st.session_state.schedules[brygada][d]
     lst.append(slot)
-    ds[day_key] = sorted(lst, key=lambda s: s["start"])
+    lst.sort(key=lambda s: s["start"])
+    save_state_to_json()
 
+def minutes_between(t1, t2):
+    return int((t2 - t1).total_seconds() / 60)
 
-def minutes_between(t1: datetime, t2: datetime) -> int:
-    return int((t2 - t1).total_seconds() // 60)
-
-
-def total_work_minutes_for_brygada(brygada: str) -> int:
+def total_work_minutes_for_brygada(brygada):
     start_t, end_t = st.session_state.working_hours[brygada]
-    return minutes_between(datetime.combine(date.today(), start_t),
-                           datetime.combine(date.today(), end_t))
+    return minutes_between(datetime.combine(date.today(), start_t), datetime.combine(date.today(), end_t))
 
+def compute_utilization_for_day(brygada, day):
+    used = sum(s["duration_min"] for s in get_day_slots_for_brygada(brygada, day))
+    return used / total_work_minutes_for_brygada(brygada) if total_work_minutes_for_brygada(brygada) > 0 else 0
 
-def compute_utilization_for_day(brygada: str, day: date) -> float:
-    slots = get_day_slots_for_brygada(brygada, day)
-    total = sum(s["duration_min"] for s in slots)
-    work_total = total_work_minutes_for_brygada(brygada)
-    return total / work_total if work_total > 0 else 0.0
+def daily_used_minutes(brygada, day):
+    return sum(s["duration_min"] for s in get_day_slots_for_brygada(brygada, day))
 
+def week_days_containing(day):
+    monday = day - timedelta(days=day.weekday())
+    return [monday + timedelta(days=i) for i in range(7)]
 
-def daily_used_minutes(brygada: str, day: date) -> int:
-    """Suma minut zajętości danej brygady w konkretnym dniu."""
-    slots = get_day_slots_for_brygada(brygada, day)
-    return sum(s["duration_min"] for s in slots)
+def used_minutes_for_week(brygada, any_day_in_week):
+    return sum(daily_used_minutes(brygada, d) for d in week_days_containing(any_day_in_week))
 
+# ===================== HEURYSTYKA =====================
 
-def week_days_containing(day: date, week_start_monday: bool = True) -> List[date]:
-    """Zwraca listę 7 dni (Pon–Ndz) zawierających wskazany dzień."""
-    weekday = day.weekday()  # Pon=0 ... Ndz=6
-    if week_start_monday:
-        start = day - timedelta(days=weekday)
-    else:
-        start = day - timedelta(days=(weekday + 1) % 7)
-    return [start + timedelta(days=i) for i in range(7)]
-
-
-def used_minutes_for_week(brygada: str, any_day_in_week: date) -> int:
-    """Suma minut zajętości brygady w tygodniu (Pon–Ndz) zawierającym podaną datę."""
-    total = 0
-    for d in week_days_containing(any_day_in_week):
-        total += daily_used_minutes(brygada, d)
-    return total
-
-# -----------------------------
-# Rozszerzona heurystyka (równomierność dzień/tydzień)
-# -----------------------------
-def find_best_insertion_for_client(client_name: str, slot_type_name: str, day: date,
-                                   pref_start_time: time, pref_end_time: time):
-    """
-    Zwraca najlepszą parę (brygada, start_dt, end_dt, score) lub None.
-    Heurystyka (łączne kryterium z wagami):
-      - delay: minimalizacja opóźnienia względem początku okna preferencji,
-      - gap: minimalizacja łącznej "pustki" (idle) w interwale po wstawieniu,
-      - balance: minimalizacja nierównomierności obciążenia (odchylenie std wykorzystań).
-        * jeśli horyzont = 'day' -> liczone na dany dzień,
-        * jeśli horyzont = 'week' -> liczone na tydzień Pon–Ndz zawierający dzień rezerwacji.
-    """
-    candidates = []
-
+def find_best_insertion_for_client(client_name, slot_type_name, day, pref_start_time, pref_end_time):
     stype = next((s for s in st.session_state.slot_types if s["name"] == slot_type_name), None)
-    if stype is None:
+    if not stype:
         return None
     dur_min = stype["minutes"]
-
     pref_start_dt = datetime.combine(day, pref_start_time)
     pref_end_dt = datetime.combine(day, pref_end_time)
-    window_len = max(1, minutes_between(pref_start_dt, pref_end_dt))  # do normalizacji opóźnienia
+    window_len = max(1, minutes_between(pref_start_dt, pref_end_dt))
 
-    # wagi heurystyki
-    W = st.session_state.heur_weights
-    horizon = st.session_state.balance_horizon  # "week" lub "day"
-
-    # profil bazowy: sumy minut i czasy pracy per brygada (dzień)
-    base_minutes_day = {}
-    work_map_day = {}
-    for b in st.session_state.brygady:
-        slots_b = get_day_slots_for_brygada(b, day)
-        base_minutes_day[b] = sum(s["duration_min"] for s in slots_b)
-        work_map_day[b] = total_work_minutes_for_brygada(b)
-
-    # profil bazowy: sumy minut i czasy pracy per brygada (tydzień)
+    base_minutes_day = {b: daily_used_minutes(b, day) for b in st.session_state.brygady}
+    work_map_day = {b: total_work_minutes_for_brygada(b) for b in st.session_state.brygady}
     week_days = week_days_containing(day)
-    base_minutes_week = {}
-    work_map_week = {}
+    base_minutes_week = {b: used_minutes_for_week(b, day) for b in st.session_state.brygady}
+    work_map_week = {b: work_map_day[b] * len(week_days) for b in st.session_state.brygady}
+
+    candidates = []
     for b in st.session_state.brygady:
-        base_minutes_week[b] = used_minutes_for_week(b, day)
-        work_map_week[b] = work_map_day[b] * len(week_days)  # stałe godziny dla każdego dnia tygodnia
-
-    for brygada in st.session_state.brygady:
-        work_start_t, work_end_t = st.session_state.working_hours[brygada]
-        day_start_dt = datetime.combine(day, work_start_t)
-        day_end_dt = datetime.combine(day, work_end_t)
-
-        # preferencje całkowicie poza godzinami pracy tej brygady -> pomijamy
+        day_start_dt = datetime.combine(day, st.session_state.working_hours[b][0])
+        day_end_dt = datetime.combine(day, st.session_state.working_hours[b][1])
         if pref_end_dt <= day_start_dt or pref_start_dt >= day_end_dt:
             continue
-
-        # lista istniejących slotów i wolne interwały
-        slots = get_day_slots_for_brygada(brygada, day)
+        slots = get_day_slots_for_brygada(b, day)
         intervals = []
         if not slots:
             intervals.append((day_start_dt, day_end_dt))
         else:
-            if slots[0]["start"] > day_start_dt:
-                intervals.append((day_start_dt, slots[0]["start"]))
+            intervals.append((day_start_dt, slots[0]["start"]))
             for i in range(len(slots) - 1):
-                a_end = slots[i]["end"]
-                b_start = slots[i + 1]["start"]
-                if b_start > a_end:
-                    intervals.append((a_end, b_start))
-            if slots[-1]["end"] < day_end_dt:
-                intervals.append((slots[-1]["end"], day_end_dt))
+                intervals.append((slots[i]["end"], slots[i+1]["start"]))
+            intervals.append((slots[-1]["end"], day_end_dt))
 
         for (iv_start, iv_end) in intervals:
-            # przecięcie z preferencjami i interwałem
+            if minutes_between(iv_start, iv_end) < dur_min:
+                continue
             candidate_start_min = max(iv_start, pref_start_dt, day_start_dt)
-            latest_start = min(
-                iv_end - timedelta(minutes=dur_min),
-                pref_end_dt - timedelta(minutes=dur_min),
-                day_end_dt - timedelta(minutes=dur_min)
-            )
+            latest_start = min(iv_end - timedelta(minutes=dur_min), pref_end_dt - timedelta(minutes=dur_min), day_end_dt - timedelta(minutes=dur_min))
             if candidate_start_min > latest_start:
                 continue
-
-            # wybierz najwcześniejszy start (można rozszerzyć o próbkowanie)
             start_candidate = candidate_start_min
             end_candidate = start_candidate + timedelta(minutes=dur_min)
-
-            # 1) delay (znormalizowany)
             delay_min = max(0, minutes_between(pref_start_dt, start_candidate))
             delay_norm = delay_min / window_len
-
-            # 2) gap: suma "pustek" przed i po w tym interwale, znormalizowana do czasu pracy brygady (dnia)
             idle_before = minutes_between(iv_start, start_candidate)
             idle_after = minutes_between(end_candidate, iv_end)
-            gap_total = max(0, idle_before) + max(0, idle_after)
-            work_total_minutes_day = work_map_day[brygada]
-            gap_norm = (gap_total / work_total_minutes_day) if work_total_minutes_day > 0 else 1.0
-
-            # 3) balance: odchylenie std wykorzystań po wstawieniu (dzień vs tydzień)
-            if horizon == "day":
-                mins_after = dict(base_minutes_day)
-                mins_after[brygada] = mins_after.get(brygada, 0) + dur_min
-                util_list_after = [
-                    (mins_after[b] / work_map_day[b] if work_map_day[b] > 0 else 0.0)
-                    for b in st.session_state.brygady
-                ]
-            else:  # "week"
-                mins_after = dict(base_minutes_week)
-                mins_after[brygada] = mins_after.get(brygada, 0) + dur_min
-                util_list_after = [
-                    (mins_after[b] / work_map_week[b] if work_map_week[b] > 0 else 0.0)
-                    for b in st.session_state.brygady
-                ]
-            fairness_std = pstdev(util_list_after) if len(util_list_after) >= 2 else 0.0
-
-            # łączny score (im mniejszy, tym lepszy)
+            gap_total = idle_before + idle_after
+            work_total_minutes_day = work_map_day[b]
+            gap_norm = gap_total / work_total_minutes_day if work_total_minutes_day > 0 else 0
+            if st.session_state.balance_horizon == "day":
+                mins_after = {bb: base_minutes_day[bb] for bb in st.session_state.brygady}
+                mins_after[b] += dur_min
+                util_list = [mins_after[bb] / work_map_day[bb] if work_map_day[bb] > 0 else 0 for bb in st.session_state.brygady]
+            else:
+                mins_after = {bb: base_minutes_week[bb] for bb in st.session_state.brygady}
+                mins_after[b] += dur_min
+                util_list = [mins_after[bb] / work_map_week[bb] if work_map_week[bb] > 0 else 0 for bb in st.session_state.brygady]
+            fairness_std = pstdev(util_list) if len(util_list) > 1 else 0
+            W = st.session_state.heur_weights
             score = W["delay"] * delay_norm + W["gap"] * gap_norm + W["balance"] * fairness_std
-
-            candidates.append({
-                "brygada": brygada,
-                "start": start_candidate,
-                "end": end_candidate,
-                "delay_min": delay_min,
-                "gap_norm": gap_norm,
-                "fairness_std": fairness_std,
-                "score": score,
-                "interval": (iv_start, iv_end)
-            })
-
+            candidates.append((score, delay_min, start_candidate, end_candidate, b))
     if not candidates:
         return None
+    candidates.sort(key=lambda x: (x[0], x[1], x[2]))
+    best = candidates[0]
+    return {"brygada": best[4], "start": best[2], "end": best[3], "score": best[0]}
 
-    candidates.sort(key=lambda c: (c["score"], c["delay_min"], c["start"]))
-    return candidates[0]
-
-
-def schedule_client_immediately(client_name: str, slot_type_name: str, day: date,
-                                pref_start: time, pref_end: time):
-    best = find_best_insertion_for_client(client_name, slot_type_name, day, pref_start, pref_end)
-    if best is None:
+def schedule_client_immediately(client_name, slot_type_name, day, pref_start, pref_end):
+    res = find_best_insertion_for_client(client_name, slot_type_name, day, pref_start, pref_end)
+    if not res:
         return False, None
-    stype = next((s for s in st.session_state.slot_types if s["name"] == slot_type_name), None)
     slot = {
-        "start": best["start"],
-        "end": best["end"],
+        "start": res["start"],
+        "end": res["end"],
         "slot_type": slot_type_name,
-        "duration_min": stype["minutes"],
+        "duration_min": int((res["end"] - res["start"]).total_seconds() / 60),
         "client": client_name
     }
-    add_slot_to_brygada(best["brygada"], day, slot)
-    return True, {"brygada": best["brygada"], "start": best["start"], "end": best["end"]}
+    add_slot_to_brygada(res["brygada"], day, slot)
+    return True, res
 
-# -----------------------------
-# UI: ustawienia (sidebar)
-# -----------------------------
-st.sidebar.header("Ustawienia")
+# ===================== INTERFEJS =====================
 
-# Typy slotów
-with st.sidebar.expander("Typy slotów (nazwa, minuty)"):
-    cur = "\n".join([f'{s["name"]}, {s["minutes"]}' for s in st.session_state.slot_types])
-    types_input = st.text_area("Typy slotów (linia per typ)", value=cur, height=140)
-    if st.button("Zastosuj typy"):
-        parsed = parse_slot_types(types_input)
-        if parsed:
-            st.session_state.slot_types = parsed
-            st.success("Zaktualizowano typy slotów.")
-        else:
-            st.error("Nie udało się sparsować typów — użyj formatu: Nazwa, minuty")
+st.title("Harmonogram slotów (z persystencją JSON)")
 
-# Brygady i godziny pracy
-with st.sidebar.expander("Brygady i godziny pracy"):
-    default_bryg = "Brygada 1\nBrygada 2"
-    bry_input = st.text_area("Lista brygad (jedna w linii)",
-                             value="\n".join(st.session_state.brygady) or default_bryg,
-                             height=120)
-    if st.button("Zastosuj brygady"):
-        bryg_list = [b.strip() for b in bry_input.splitlines() if b.strip()]
-        st.session_state.brygady = bryg_list
-        ensure_brygady_in_state(bryg_list)
-        st.success("Zaktualizowano listę brygad (pamiętaj ustawić dla nich godziny pracy poniżej).")
+with st.sidebar:
+    st.subheader("Konfiguracja slotów")
+    txt = st.text_area("Typy slotów (format: Nazwa, minuty)", value="\n".join(f"{s['name']}, {s['minutes']}" for s in st.session_state.slot_types))
+    st.session_state.slot_types = parse_slot_types(txt)
 
-    st.markdown("Ustaw godziny pracy dla każdej brygady:")
-    ensure_brygady_in_state([b.strip() for b in bry_input.splitlines() if b.strip()])
+    st.subheader("Brygady")
+    txt_b = st.text_area("Lista brygad (po jednej w linii)", value="\n".join(st.session_state.brygady))
+    st.session_state.brygady = [line.strip() for line in txt_b.splitlines() if line.strip()]
+    ensure_brygady_in_state(st.session_state.brygady)
+
     for b in st.session_state.brygady:
-        colA, colB = st.columns([1, 1])
-        prev_start, prev_end = st.session_state.working_hours.get(b, (time(8, 0), time(16, 0)))
-        with colA:
-            start_t = st.time_input(f"{b} - start", value=prev_start, key=f"wh_start_{b}")
-        with colB:
-            end_t = st.time_input(f"{b} - koniec", value=prev_end, key=f"wh_end_{b}")
+        st.write(f"Godziny pracy {b}:")
+        start_t = st.time_input(f"Start {b}", value=st.session_state.working_hours[b][0], key=f"{b}_start")
+        end_t = st.time_input(f"Koniec {b}", value=st.session_state.working_hours[b][1], key=f"{b}_end")
+        st.session_state.working_hours[b] = (start_t, end_t)
 
-        if start_t >= end_t:
-            st.warning(f"Godziny pracy dla {b} są niepoprawne (start ≥ koniec). "
-                       f"Zachowano poprzednie: {prev_start.strftime('%H:%M')}–{prev_end.strftime('%H:%M')}")
-        else:
-            st.session_state.working_hours[b] = (start_t, end_t)
-
-# Wagi heurystyki + horyzont równomierności
-with st.sidebar.expander("Heurystyka: wagi i horyzont"):
-    w_delay = st.slider("Opóźnienie vs preferencje", 0.0, 1.0,
-                        st.session_state.heur_weights["delay"], 0.05)
-    w_gap = st.slider("Minimalizacja przerw (idle)", 0.0, 1.0,
-                      st.session_state.heur_weights["gap"], 0.05)
-    w_balance = st.slider("Równomierność obciążenia", 0.0, 1.0,
-                          st.session_state.heur_weights["balance"], 0.05)
-    s = w_delay + w_gap + w_balance
+    st.subheader("Wagi heurystyki")
+    d = st.slider("Delay", 0.0, 1.0, st.session_state.heur_weights["delay"])
+    g = st.slider("Gap", 0.0, 1.0, st.session_state.heur_weights["gap"])
+    bal = st.slider("Balance", 0.0, 1.0, st.session_state.heur_weights["balance"])
+    s = d + g + bal
     if s == 0:
-        st.info("Suma wag = 0; przywrócono domyślne (0.5/0.3/0.2).")
-        w_delay, w_gap, w_balance = 0.5, 0.3, 0.2
-        s = 1.0
-    st.session_state.heur_weights = {
-        "delay": w_delay / s, "gap": w_gap / s, "balance": w_balance / s
-    }
-
-    horizon = st.radio("Horyzont równomierności",
-                       options=["week", "day"],
-                       format_func=lambda x: "Tydzień (Pon–Ndz)" if x == "week" else "Dzień",
-                       index=0 if st.session_state.balance_horizon == "week" else 1,
-                       horizontal=True)
-    st.session_state.balance_horizon = horizon
-
-# Reset harmonogramu
-if st.sidebar.button("Wyczyść harmonogram (usuń wszystkie sloty)"):
-    st.session_state.schedules = {b: {} for b in st.session_state.brygady}
-    st.info("Harmonogram wyczyszczony.")
-
-# -----------------------------
-# UI: formularz dodawania klienta
-# -----------------------------
-st.subheader("Dodaj klienta (pojedynczo) — system przypisze optymalnie brygadę")
-with st.form("add_client_form"):
-    client_name = st.text_input("Nazwa klienta", value="")
-    slot_type_names = [s["name"] for s in st.session_state.slot_types]
-    slot_type_choice = st.selectbox("Typ slotu", options=slot_type_names)
-    day_choice = st.date_input("Data preferowana", value=datetime.today().date())
-    pref_start = st.time_input("Preferowany start (okno)", value=time(9, 0))
-    pref_end = st.time_input("Preferowany koniec (okno)", value=time(17, 0))
-    submit = st.form_submit_button("Dodaj klienta i przypisz")
-
-if submit:
-    if not client_name.strip():
-        st.warning("Podaj nazwę klienta.")
+        st.session_state.heur_weights = {"delay": 0.34, "gap": 0.33, "balance": 0.33}
     else:
-        ensure_brygady_in_state(st.session_state.brygady)
-        success, info = schedule_client_immediately(client_name.strip(), slot_type_choice,
-                                                    day_choice, pref_start, pref_end)
-        st.session_state.clients_added.append({
-            "client": client_name.strip(),
-            "slot_type": slot_type_choice,
-            "date": day_choice.strftime("%Y-%m-%d"),
-            "pref_start": pref_start.strftime("%H:%M"),
-            "pref_end": pref_end.strftime("%H:%M"),
-            "assigned": success,
-            "assigned_info": info
-        })
-        if success:
-            st.success(
-                f"Pomyślnie przypisano klienta do brygady: {info['brygada']} "
-                f"({info['start'].strftime('%Y-%m-%d %H:%M')} - {info['end'].strftime('%H:%M')})"
-            )
-        else:
-            st.error("Brak dostępnego slotu pasującego do preferencji — klient nieprzydzielony.")
+        st.session_state.heur_weights = {"delay": d/s, "gap": g/s, "balance": bal/s}
 
-# -----------------------------
-# Widoki: tabela, wykresy, historia
-# -----------------------------
-st.subheader("Aktualny harmonogram (tabela)")
-rows = []
+    st.session_state.balance_horizon = st.selectbox("Horyzont równomierności", ["week", "day"], index=0 if st.session_state.balance_horizon=="week" else 1)
+
+    if st.button("Wyczyść harmonogram"):
+        st.session_state.schedules = {b: {} for b in st.session_state.brygady}
+        st.session_state.clients_added = []
+        save_state_to_json()
+        st.success("Harmonogram wyczyszczony i zapisany.")
+
+# ===================== DODAWANIE KLIENTA =====================
+
+st.subheader("Dodaj klienta")
+with st.form("add_client_form"):
+    client_name = st.text_input("Nazwa klienta")
+    slot_type_name = st.selectbox("Typ slotu", [s["name"] for s in st.session_state.slot_types])
+    day = st.date_input("Dzień", value=date.today())
+    pref_start = st.time_input("Preferowany start", value=time(9, 0))
+    pref_end = st.time_input("Preferowany koniec", value=time(12, 0))
+    submitted = st.form_submit_button("Dodaj")
+    if submitted:
+        ok, info = schedule_client_immediately(client_name, slot_type_name, day, pref_start, pref_end)
+        if ok:
+            st.success(f"Klient {client_name} dodany do {info['brygada']} {info['start'].strftime('%H:%M')}-{info['end'].strftime('%H:%M')}")
+        else:
+            st.error("Nie udało się znaleźć miejsca.")
+
+# ===================== TABELA I WYKRESY =====================
+
+all_slots = []
 for b in st.session_state.brygady:
-    for day_key, lst in st.session_state.schedules.get(b, {}).items():
-        for s in lst:
-            rows.append({
-                "date": day_key,
-                "brygada": b,
-                "slot_type": s["slot_type"],
-                "start": s["start"],
-                "end": s["end"],
-                "duration_min": s["duration_min"],
-                "client": s["client"]
+    for d, slots in st.session_state.schedules.get(b, {}).items():
+        for s in slots:
+            all_slots.append({
+                "Brygada": b,
+                "Dzień": d,
+                "Klient": s["client"],
+                "Typ": s["slot_type"],
+                "Start": s["start"],
+                "Koniec": s["end"],
+                "Czas [min]": s["duration_min"]
             })
 
-if rows:
-    df_all = pd.DataFrame(rows)
-    df_display = df_all.sort_values(["date", "brygada", "start"]).reset_index(drop=True)
-    df_display["start_str"] = df_display["start"].dt.strftime("%Y-%m-%d %H:%M")
-    df_display["end_str"] = df_display["end"].dt.strftime("%Y-%m-%d %H:%M")
-    st.dataframe(df_display[["date", "brygada", "slot_type", "start_str", "end_str", "duration_min", "client"]],
-                 use_container_width=True)
-else:
-    st.info("Brak slotów w harmonogramie.")
+df = pd.DataFrame(all_slots)
+st.subheader("Tabela harmonogramu")
+st.dataframe(df)
 
-# Wykres Gantta
-if rows:
-    try:
-        fig = px.timeline(df_all, x_start="start", x_end="end", y="brygada",
-                          color="slot_type", hover_data=["client", "date"],
-                          category_orders={"brygada": st.session_state.brygady})
-        fig.update_yaxes(title_text="Brygada", automargin=True)
-        fig.update_xaxes(title_text="Czas", tickformat="%H:%M\n%d-%m")
-        fig.update_layout(height=300 + 120 * min(6, len(st.session_state.brygady)))
-        st.plotly_chart(fig, use_container_width=True)
-    except Exception as e:
-        st.error(f"Błąd przy rysowaniu wykresu Gantta: {e}")
+if not df.empty:
+    st.subheader("Wykres Gantta")
+    fig = px.timeline(df, x_start="Start", x_end="Koniec", y="Brygada", color="Klient", hover_data=["Typ"])
+    fig.update_yaxes(autorange="reversed")
+    st.plotly_chart(fig, use_container_width=True)
 
-# Wykorzystanie per brygada na wybrany dzień
-st.subheader("Wykorzystanie czasu (per brygada, wybrany dzień)")
-col_day = st.date_input("Wybierz dzień do analizy wykorzystania", value=datetime.today().date(), key="util_day")
-util_rows = []
-for b in st.session_state.brygady:
-    util = compute_utilization_for_day(b, col_day)
-    util_rows.append({"brygada": b, "utilization_percent": round(util * 100, 1)})
-if util_rows:
-    st.table(pd.DataFrame(util_rows))
+    st.subheader("Tygodniowa heatmapa obciążenia")
+    week_days = week_days_containing(date.today())
+    heatmap_data = []
+    for b in st.session_state.brygady:
+        row = []
+        for d in week_days:
+            util = compute_utilization_for_day(b, d)
+            row.append(util)
+        heatmap_data.append(row)
+    hm_df = pd.DataFrame(heatmap_data, index=st.session_state.brygady, columns=[d.strftime("%a %d-%m") for d in week_days])
+    st.dataframe((hm_df*100).round(1))
 
-# -----------------------------
-# NOWOŚĆ: Podgląd tygodniowy — heatmapa
-# -----------------------------
-st.subheader("Podgląd tygodniowy — heatmapa (Pon–Ndz)")
-
-heat_col1, heat_col2 = st.columns([1, 1])
-with heat_col1:
-    week_anchor = st.date_input("Wybierz tydzień (podaj dowolny dzień w tygodniu):",
-                                value=datetime.today().date(),
-                                key="week_anchor")
-with heat_col2:
-    metric = st.radio("Metryka", options=["Procent wykorzystania", "Minuty zajętości"],
-                      index=0, horizontal=True)
-
-week_days = week_days_containing(week_anchor)
-week_labels = [d.strftime("%d-%m") for d in week_days]
-
-heat_rows = []
-for b in st.session_state.brygady:
-    for d, label in zip(week_days, week_labels):
-        if metric == "Procent wykorzystania":
-            val = compute_utilization_for_day(b, d) * 100.0
-        else:
-            val = daily_used_minutes(b, d)
-        heat_rows.append({"brygada": b, "day_label": label, "value": round(val, 1)})
-
-if heat_rows:
-    df_week = pd.DataFrame(heat_rows)
-    # pivot: wiersze = brygady, kolumny = dni tygodnia
-    pivot = (df_week.pivot(index="brygada", columns="day_label", values="value")
-                    .reindex(index=st.session_state.brygady))  # zachowaj kolejność brygad
-
-    # Ustal zakres kolorów
-    if metric == "Procent wykorzystania":
-        zmin, zmax = 0, 100
-        color_label = "Wykorzystanie [%]"
-    else:
-        # górny zakres na podstawie max dziennego czasu pracy wśród brygad
-        max_work = max((total_work_minutes_for_brygada(b) for b in st.session_state.brygady), default=60)
-        zmin, zmax = 0, max_work
-        color_label = "Zajętość [min]"
-
-    # Heatmapa
-    fig_h = px.imshow(
-        pivot.values,
-        x=pivot.columns,
-        y=pivot.index,
-        color_continuous_scale="RdYlGn",
-        zmin=zmin,
-        zmax=zmax,
-        aspect="auto",
-        origin="upper",
-        labels=dict(color=color_label)
-    )
-    fig_h.update_xaxes(side="top")
-    fig_h.update_layout(height=300 + 40 * max(1, len(st.session_state.brygady)))
-    st.plotly_chart(fig_h, use_container_width=True)
-
-    # Pod spodem: tabela i eksport CSV
-    st.caption("Tabela wartości (te same dane co na heatmapie):")
-    st.dataframe(pivot.fillna(0.0), use_container_width=True)
-    csv = pivot.reset_index().to_csv(index=False).encode("utf-8")
-    st.download_button("Pobierz tabelę tygodniową (CSV)", data=csv,
-                       file_name=f"heatmap_week_{week_days[0].isoformat()}_{week_days[-1].isoformat()}.csv",
-                       mime="text/csv")
-else:
-    st.info("Brak danych do wyświetlenia (dodaj sloty lub zdefiniuj brygady i godziny).")
-
-# -----------------------------
-# Historia
-# -----------------------------
-st.subheader("Historia dodawania klientów")
-if st.session_state.clients_added:
-    hdf = pd.DataFrame(st.session_state.clients_added)
-    st.dataframe(hdf, use_container_width=True)
-else:
-    st.write("Brak dodanych klientów.")
-
-# -----------------------------
-# Koniec + uwagi
-# -----------------------------
-st.markdown("---")
-st.markdown(
-    "Uwagi:\n\n"
-    "- Heatmapa pokazuje tygodniowy przegląd obciążenia: w procentach (relatywnie do godzin pracy) lub w minutach.\n"
-    "- Zakres tygodnia to zawsze Pon–Ndz zawierające wskazaną datę.\n"
-    "- Wagi heurystyki i horyzont równomierności (dzień/tydzień) zmienisz w panelu bocznym."
-)
+st.subheader("Historia dodawania")
+st.dataframe(pd.DataFrame(st.session_state.clients_added))
