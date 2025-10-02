@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import numpy as np
 import os
 import json
@@ -38,6 +39,7 @@ def schedules_to_jsonable():
         "heur_weights": st.session_state.heur_weights,
         "balance_horizon": st.session_state.balance_horizon,
         "client_counter": st.session_state.client_counter,
+        "not_found_counter": st.session_state.not_found_counter,
     }
 
 def save_state_to_json(filename="schedules.json"):
@@ -83,6 +85,7 @@ def load_state_from_json(filename="schedules.json"):
     st.session_state.heur_weights = data.get("heur_weights", {"delay": 0.34, "gap": 0.33, "balance": 0.33})
     st.session_state.balance_horizon = data.get("balance_horizon", "week")
     st.session_state.client_counter = data.get("client_counter", 1)
+    st.session_state.not_found_counter = data.get("not_found_counter", 0)
     return True
 
 # ===================== INICJALIZACJA STANU =====================
@@ -97,6 +100,7 @@ if "slot_types" not in st.session_state:
         st.session_state.heur_weights = {"delay": 0.34, "gap": 0.33, "balance": 0.33}
         st.session_state.balance_horizon = "week"
         st.session_state.client_counter = 1
+        st.session_state.not_found_counter = 0
 
 # ===================== FUNKCJE POMOCNICZE =====================
 
@@ -114,7 +118,7 @@ def parse_slot_types(text):
                 out.append({"name": parts[0].strip(), "minutes": minutes, "weight": weight})
             except:
                 pass
-        elif len(parts) == 2:  # kompatybilność wstecz
+        elif len(parts) == 2:  # kompatybilność
             try:
                 minutes = int(parts[1])
                 out.append({"name": parts[0].strip(), "minutes": minutes, "weight": 1})
@@ -147,28 +151,7 @@ def add_slot_to_brygada(brygada, day, slot):
     lst.sort(key=lambda s: s["start"])
     save_state_to_json()
 
-def minutes_between(t1, t2):
-    return int((t2 - t1).total_seconds() / 60)
-
-def total_work_minutes_for_brygada(brygada):
-    start_t, end_t = st.session_state.working_hours[brygada]
-    return minutes_between(datetime.combine(date.today(), start_t), datetime.combine(date.today(), end_t))
-
-def compute_utilization_for_day(brygada, day):
-    used = sum(s["duration_min"] for s in get_day_slots_for_brygada(brygada, day))
-    return used / total_work_minutes_for_brygada(brygada) if total_work_minutes_for_brygada(brygada) > 0 else 0
-
-def daily_used_minutes(brygada, day):
-    return sum(s["duration_min"] for s in get_day_slots_for_brygada(brygada, day))
-
-def week_days_containing(day):
-    monday = day - timedelta(days=day.weekday())
-    return [monday + timedelta(days=i) for i in range(7)]
-
-def used_minutes_for_week(brygada, any_day_in_week):
-    return sum(daily_used_minutes(brygada, d) for d in week_days_containing(any_day_in_week))
-
-# ===================== HEURYSTYKA (skrótowo, bez zmian logiki) =====================
+# ===================== HEURYSTYKA (uproszczona) =====================
 
 def schedule_client_immediately(client_name, slot_type_name, day, pref_start, pref_end):
     slot_type = next((s for s in st.session_state.slot_types if s["name"] == slot_type_name), None)
@@ -178,7 +161,6 @@ def schedule_client_immediately(client_name, slot_type_name, day, pref_start, pr
     dur = timedelta(minutes=slot_type["minutes"])
     candidates = []
     for b in st.session_state.brygady:
-        day_str = day.strftime("%Y-%m-%d")
         existing = get_day_slots_for_brygada(b, day)
         start_wh, end_wh = st.session_state.working_hours[b]
         start_dt = datetime.combine(day, max(pref_start, start_wh))
@@ -192,7 +174,7 @@ def schedule_client_immediately(client_name, slot_type_name, day, pref_start, pr
 
     if not candidates:
         return False, None
-    chosen = candidates[0]  # prosto: bierzemy pierwszy
+    chosen = candidates[0]
     brygada, start, end = chosen
     slot = {
         "start": start,
@@ -205,7 +187,7 @@ def schedule_client_immediately(client_name, slot_type_name, day, pref_start, pr
     add_slot_to_brygada(brygada, day, slot)
     return True, slot
 
-# ===================== PREDEFINIOWANE PRZEDZIAŁY =====================
+# ===================== PREDEF SLOTS =====================
 
 PREFERRED_SLOTS = {
     "8:00-12:00": (time(8, 0), time(12, 0)),
@@ -252,6 +234,7 @@ with st.sidebar:
         st.session_state.schedules = {b: {} for b in st.session_state.brygady}
         st.session_state.clients_added = []
         st.session_state.client_counter = 1
+        st.session_state.not_found_counter = 0
         save_state_to_json()
         st.success("Harmonogram wyczyszczony i zapisany.")
 
@@ -262,20 +245,17 @@ with st.form("add_client_form"):
     default_client_name = f"Klient {st.session_state.client_counter}"
     client_name = st.text_input("Nazwa klienta", value=default_client_name)
 
-    # Losowanie typu slotu
     if st.session_state.slot_types:
         auto_slot_type_name = weighted_choice(st.session_state.slot_types)
     else:
         auto_slot_type_name = "Standard"
 
-    # Losowanie przedziału preferencji
     auto_pref_range_label = random.choice(list(PREFERRED_SLOTS.keys()))
 
     st.info(f"Automatycznie wybrano: **{auto_slot_type_name}**, preferencja: **{auto_pref_range_label}**")
 
-    # Możliwość ręcznej zmiany
     slot_type_name = st.selectbox(
-        "Wybierz typ slotu (możesz zmienić wylosowany)",
+        "Wybierz typ slotu",
         [s["name"] for s in st.session_state.slot_types],
         index=[s["name"] for s in st.session_state.slot_types].index(auto_slot_type_name)
         if auto_slot_type_name in [s["name"] for s in st.session_state.slot_types] else 0
@@ -294,7 +274,6 @@ with st.form("add_client_form"):
     if submitted:
         ok, info = schedule_client_immediately(client_name, slot_type_name, day, pref_start, pref_end)
         if ok:
-            # dopisanie przedziału do slotu
             for b in st.session_state.schedules:
                 for d, slots in st.session_state.schedules[b].items():
                     for s in slots:
@@ -304,6 +283,7 @@ with st.form("add_client_form"):
             st.success(f"Klient {client_name} dodany ({slot_type_name}, {pref_range_label})")
             st.session_state.client_counter += 1
         else:
+            st.session_state.not_found_counter += 1
             st.error("Nie udało się znaleźć miejsca.")
 
 # ===================== TABELA I WYKRESY =====================
@@ -331,15 +311,23 @@ if not df.empty:
     st.subheader("Wykres Gantta")
     fig = px.timeline(df, x_start="Start", x_end="Koniec", y="Brygada", color="Klient", hover_data=["Typ", "Preferencja"])
     fig.update_yaxes(autorange="reversed")
+
+    # Dodajemy linie pionowe dla przedziałów czasowych
+    for slot_label, (s, e) in PREFERRED_SLOTS.items():
+        fig.add_vline(x=datetime.combine(date.today(), s), line=dict(color="gray", dash="dot"), annotation_text=slot_label.split("-")[0])
+        fig.add_vline(x=datetime.combine(date.today(), e), line=dict(color="gray", dash="dot"), annotation_text=slot_label.split("-")[1])
+
     st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("Tygodniowa heatmapa obciążenia")
-    week_days = week_days_containing(date.today())
+    week_days = [date.today() - timedelta(days=date.today().weekday()) + timedelta(days=i) for i in range(7)]
     heatmap_data = []
     for b in st.session_state.brygady:
         row = []
         for d in week_days:
-            util = compute_utilization_for_day(b, d)
+            used = sum(s["duration_min"] for s in get_day_slots_for_brygada(b, d))
+            total = total_work_minutes_for_brygada(b)
+            util = used / total if total > 0 else 0
             row.append(util)
         heatmap_data.append(row)
     hm_df = pd.DataFrame(heatmap_data, index=st.session_state.brygady, columns=[d.strftime("%a %d-%m") for d in week_days])
@@ -347,3 +335,8 @@ if not df.empty:
 
 st.subheader("Historia dodawania")
 st.dataframe(pd.DataFrame(st.session_state.clients_added))
+
+# ===================== PODSUMOWANIE =====================
+st.subheader("Podsumowanie")
+st.write(f"✅ Dodano klientów: {len(st.session_state.clients_added)}")
+st.write(f"❌ Nie udało się znaleźć slotu dla: {st.session_state.not_found_counter}")
