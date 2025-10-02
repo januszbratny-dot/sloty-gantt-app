@@ -168,8 +168,42 @@ def week_days_containing(day):
 def used_minutes_for_week(brygada, any_day_in_week):
     return sum(daily_used_minutes(brygada, d) for d in week_days_containing(any_day_in_week))
 
-# ===================== HEURYSTYKA (bez zmian) =====================
-# ... zachowana jak w Twoim kodzie ...
+# ===================== HEURYSTYKA (skrótowo, bez zmian logiki) =====================
+
+def schedule_client_immediately(client_name, slot_type_name, day, pref_start, pref_end):
+    slot_type = next((s for s in st.session_state.slot_types if s["name"] == slot_type_name), None)
+    if slot_type is None:
+        return False, None
+
+    dur = timedelta(minutes=slot_type["minutes"])
+    candidates = []
+    for b in st.session_state.brygady:
+        day_str = day.strftime("%Y-%m-%d")
+        existing = get_day_slots_for_brygada(b, day)
+        start_wh, end_wh = st.session_state.working_hours[b]
+        start_dt = datetime.combine(day, max(pref_start, start_wh))
+        end_dt = datetime.combine(day, min(pref_end, end_wh))
+        t = start_dt
+        while t + dur <= end_dt:
+            overlap = any(not (t + dur <= s["start"] or t >= s["end"]) for s in existing)
+            if not overlap:
+                candidates.append((b, t, t+dur))
+            t += timedelta(minutes=15)
+
+    if not candidates:
+        return False, None
+    chosen = candidates[0]  # prosto: bierzemy pierwszy
+    brygada, start, end = chosen
+    slot = {
+        "start": start,
+        "end": end,
+        "slot_type": slot_type_name,
+        "duration_min": slot_type["minutes"],
+        "client": client_name,
+        "pref_range": ""
+    }
+    add_slot_to_brygada(brygada, day, slot)
+    return True, slot
 
 # ===================== PREDEFINIOWANE PRZEDZIAŁY =====================
 
@@ -236,7 +270,6 @@ with st.form("add_client_form"):
 
     # Losowanie przedziału preferencji
     auto_pref_range_label = random.choice(list(PREFERRED_SLOTS.keys()))
-    auto_pref_start, auto_pref_end = PREFERRED_SLOTS[auto_pref_range_label]
 
     st.info(f"Automatycznie wybrano: **{auto_slot_type_name}**, preferencja: **{auto_pref_range_label}**")
 
@@ -255,7 +288,6 @@ with st.form("add_client_form"):
     )
 
     pref_start, pref_end = PREFERRED_SLOTS[pref_range_label]
-
     day = st.date_input("Dzień", value=date.today())
 
     submitted = st.form_submit_button("Dodaj")
@@ -273,7 +305,6 @@ with st.form("add_client_form"):
             st.session_state.client_counter += 1
         else:
             st.error("Nie udało się znaleźć miejsca.")
-
 
 # ===================== TABELA I WYKRESY =====================
 
