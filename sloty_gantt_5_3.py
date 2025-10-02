@@ -171,8 +171,12 @@ PREFERRED_SLOTS={
     "16:00-20:00": (time(16,0),time(20,0))
 }
 
+def get_week_days(reference_day):
+    monday = reference_day - timedelta(days=reference_day.weekday())
+    return [monday + timedelta(days=i) for i in range(7)]
+
 # ===================== UI =====================
-st.title("📅 Harmonogram slotów")
+st.title("📅 Harmonogram slotów - Tydzień")
 
 with st.sidebar:
     st.subheader("⚙️ Konfiguracja")
@@ -197,6 +201,12 @@ with st.sidebar:
         st.session_state.not_found_counter=0
         save_state_to_json()
         st.success("Harmonogram wyczyszczony.")
+
+# ===================== WEEK NAVIGATION =====================
+st.subheader("⬅️ Wybór tygodnia")
+week_offset = st.number_input("Tydzień (0 = bieżący, 1 = następny, -1 = poprzedni)", value=0, step=1)
+week_ref = date.today() + timedelta(weeks=week_offset)
+week_days = get_week_days(week_ref)
 
 # ===================== ADD CLIENT =====================
 st.subheader("➕ Dodaj klienta")
@@ -231,10 +241,12 @@ with st.form("add_client_form"):
 # ===================== SCHEDULE TABLE =====================
 all_slots=[]
 for b in st.session_state.brygady:
-    for d,slots in st.session_state.schedules.get(b,{}).items():
+    for d in week_days:
+        d_str=d.strftime("%Y-%m-%d")
+        slots=st.session_state.schedules.get(b,{}).get(d_str,[])
         for s in slots:
             all_slots.append({
-                "Brygada":b,"Dzień":d,"Klient":s["client"],
+                "Brygada":b,"Dzień":d_str,"Klient":s["client"],
                 "Typ":s["slot_type"],"Preferencja":s.get("pref_range",""),
                 "Start":s["start"],"Koniec":s["end"],"Czas [min]":s["duration_min"]
             })
@@ -244,16 +256,16 @@ st.dataframe(df)
 
 # ===================== GANTT =====================
 if not df.empty:
-    st.subheader("📊 Wykres Gantta")
+    st.subheader("📊 Wykres Gantta - tydzień")
     fig=px.timeline(df,x_start="Start",x_end="Koniec",y="Brygada",color="Klient",hover_data=["Typ","Preferencja"])
     fig.update_yaxes(autorange="reversed")
-    # przedziały czasowe
-    colors=["rgba(200,200,200,0.15)"]*3
-    for (label,(s,e)),col in zip(PREFERRED_SLOTS.items(),colors):
-        fig.add_vrect(x0=datetime.combine(date.today(),s),x1=datetime.combine(date.today(),e),
-                      fillcolor=col,opacity=0.2,layer="below",line_width=0)
-        fig.add_vline(x=datetime.combine(date.today(),s),line_width=1,line_dash="dot",line_color="black")
-        fig.add_vline(x=datetime.combine(date.today(),e),line_width=1,line_dash="dot",line_color="black")
+    # rysowanie predefiniowanych slotów dla każdego dnia tygodnia
+    for d in week_days:
+        for label,(s,e) in PREFERRED_SLOTS.items():
+            fig.add_vrect(x0=datetime.combine(d,s),x1=datetime.combine(d,e),
+                          fillcolor="rgba(200,200,200,0.15)",opacity=0.2,layer="below",line_width=0)
+            fig.add_vline(x=datetime.combine(d,s),line_width=1,line_dash="dot",line_color="black")
+            fig.add_vline(x=datetime.combine(d,e),line_width=1,line_dash="dot",line_color="black")
     st.plotly_chart(fig,use_container_width=True)
 
 # ===================== SUMMARY =====================
@@ -263,19 +275,16 @@ st.write(f"❌ Brak slotu dla: {st.session_state.not_found_counter}")
 
 # ===================== UTILIZATION PER DAY =====================
 st.subheader("📊 Wykorzystanie brygad w podziale na dni (%)")
-all_days=set()
-for b in st.session_state.brygady:
-    all_days.update(st.session_state.schedules.get(b,{}).keys())
-all_days=sorted(all_days)
 util_data=[]
 for b in st.session_state.brygady:
     row={"Brygada":b}
     wh_start,wh_end=st.session_state.working_hours[b]
     daily_minutes=(datetime.combine(date.today(),wh_end)-datetime.combine(date.today(),wh_start)).seconds//60
-    for d in all_days:
-        slots=st.session_state.schedules.get(b,{}).get(d,[])
+    for d in week_days:
+        d_str=d.strftime("%Y-%m-%d")
+        slots=st.session_state.schedules.get(b,{}).get(d_str,[])
         used=sum(s["duration_min"] for s in slots)
-        row[d]=round(100*used/daily_minutes,1) if daily_minutes>0 else 0
+        row[d_str]=round(100*used/daily_minutes,1) if daily_minutes>0 else 0
     util_data.append(row)
 st.dataframe(pd.DataFrame(util_data))
 
@@ -286,8 +295,8 @@ for b in st.session_state.brygady:
     total=sum(s["duration_min"] for d in st.session_state.schedules.get(b,{}).values() for s in d)
     wh_start,wh_end=st.session_state.working_hours[b]
     daily_minutes=(datetime.combine(date.today(),wh_end)-datetime.combine(date.today(),wh_start)).seconds//60
-    days_count=len(st.session_state.schedules.get(b,{}))
-    available=daily_minutes*days_count if days_count>0 else 1
+    days_count=len([d for d in week_days if st.session_state.schedules.get(b,{}).get(d.strftime("%Y-%m-%d"),[])])
+    available=daily_minutes*len(week_days)
     utilization=round(100*total/available,1)
     rows.append({"Brygada":b,"Zajętość [min]":total,"Dostępne [min]":available,"Wykorzystanie [%]":utilization})
 st.table(pd.DataFrame(rows))
