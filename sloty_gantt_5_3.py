@@ -1,13 +1,11 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import numpy as np
 import os
 import json
 import random
 from datetime import datetime, timedelta, date, time
-from statistics import pstdev
 
 # ===================== PERSISTENCE (JSON) =====================
 
@@ -118,7 +116,7 @@ def parse_slot_types(text):
                 out.append({"name": parts[0].strip(), "minutes": minutes, "weight": weight})
             except:
                 pass
-        elif len(parts) == 2:  # kompatybilność
+        elif len(parts) == 2:
             try:
                 minutes = int(parts[1])
                 out.append({"name": parts[0].strip(), "minutes": minutes, "weight": 1})
@@ -151,7 +149,11 @@ def add_slot_to_brygada(brygada, day, slot):
     lst.sort(key=lambda s: s["start"])
     save_state_to_json()
 
-# ===================== HEURYSTYKA (uproszczona) =====================
+def total_work_minutes_for_brygada(brygada):
+    start_t, end_t = st.session_state.working_hours[brygada]
+    return int((datetime.combine(date.today(), end_t) - datetime.combine(date.today(), start_t)).total_seconds() / 60)
+
+# ===================== HEURYSTYKA =====================
 
 def schedule_client_immediately(client_name, slot_type_name, day, pref_start, pref_end):
     slot_type = next((s for s in st.session_state.slot_types if s["name"] == slot_type_name), None)
@@ -312,28 +314,22 @@ if not df.empty:
     fig = px.timeline(df, x_start="Start", x_end="Koniec", y="Brygada", color="Klient", hover_data=["Typ", "Preferencja"])
     fig.update_yaxes(autorange="reversed")
 
-    # Dodajemy linie pionowe dla przedziałów czasowych
-    for slot_label, (s, e) in PREFERRED_SLOTS.items():
-        fig.add_vline(x=datetime.combine(date.today(), s), line=dict(color="gray", dash="dot"), annotation=dict(text=slot_label.split("-")[0], showarrow=False, y=1, yref="paper"))
-        fig.add_vline(x=datetime.combine(date.today(), e), line=dict(color="gray", dash="dot"), annotation=dict(text=slot_label.split("-")[1], showarrow=False, y=1, yref="paper"))
-
-        
+    # Dodajemy kolorowe pasy dla przedziałów czasowych
+    colors = ["rgba(200,200,200,0.1)", "rgba(200,200,200,0.15)", "rgba(200,200,200,0.1)"]
+    for (slot_label, (s, e)), col in zip(PREFERRED_SLOTS.items(), colors):
+        fig.add_vrect(
+            x0=datetime.combine(date.today(), s),
+            x1=datetime.combine(date.today(), e),
+            fillcolor=col, opacity=0.3, layer="below", line_width=0
+        )
+        # Dodaj podpis
+        fig.add_annotation(
+            x=datetime.combine(date.today(), s) + (datetime.combine(date.today(), e) - datetime.combine(date.today(), s)) / 2,
+            y=1.05, xref="x", yref="paper",
+            text=slot_label, showarrow=False, font=dict(size=10, color="gray")
+        )
 
     st.plotly_chart(fig, use_container_width=True)
-
-    st.subheader("Tygodniowa heatmapa obciążenia")
-    week_days = [date.today() - timedelta(days=date.today().weekday()) + timedelta(days=i) for i in range(7)]
-    heatmap_data = []
-    for b in st.session_state.brygady:
-        row = []
-        for d in week_days:
-            used = sum(s["duration_min"] for s in get_day_slots_for_brygada(b, d))
-            total = total_work_minutes_for_brygada(b)
-            util = used / total if total > 0 else 0
-            row.append(util)
-        heatmap_data.append(row)
-    hm_df = pd.DataFrame(heatmap_data, index=st.session_state.brygady, columns=[d.strftime("%a %d-%m") for d in week_days])
-    st.dataframe((hm_df*100).round(1))
 
 st.subheader("Historia dodawania")
 st.dataframe(pd.DataFrame(st.session_state.clients_added))
