@@ -5,7 +5,6 @@ import random
 import os
 import json
 from datetime import datetime, timedelta, date, time
-from statistics import pstdev
 
 # ===================== PERSISTENCE =====================
 def schedules_to_jsonable():
@@ -34,7 +33,6 @@ def schedules_to_jsonable():
         "schedules": data,
         "clients_added": st.session_state.clients_added,
         "balance_horizon": st.session_state.balance_horizon,
-        "heur_weights": st.session_state.heur_weights,
         "client_counter": st.session_state.client_counter,
         "not_found_counter": st.session_state.not_found_counter,
     }
@@ -79,9 +77,8 @@ def load_state_from_json(filename="schedules.json"):
             ]
     st.session_state.clients_added = data.get("clients_added", [])
     st.session_state.balance_horizon = data.get("balance_horizon", "week")
-    st.session_state.heur_weights = data.get("heur_weights", {"delay":0.34,"gap":0.33,"balance":0.33})
-    st.session_state.client_counter = data.get("client_counter",1)
-    st.session_state.not_found_counter = data.get("not_found_counter",0)
+    st.session_state.client_counter = data.get("client_counter", 1)
+    st.session_state.not_found_counter = data.get("not_found_counter", 0)
     return True
 
 # ===================== INITIALIZATION =====================
@@ -93,7 +90,6 @@ if "slot_types" not in st.session_state:
         st.session_state.schedules = {}
         st.session_state.clients_added = []
         st.session_state.balance_horizon = "week"
-        st.session_state.heur_weights = {"delay":0.34,"gap":0.33,"balance":0.33}
         st.session_state.client_counter = 1
         st.session_state.not_found_counter = 0
 
@@ -144,31 +140,29 @@ def add_slot_to_brygada(brygada, day, slot):
     st.session_state.schedules[brygada][d].sort(key=lambda s: s["start"])
     save_state_to_json()
 
-def minutes_between(t1,t2):
-    return int((t2-t1).total_seconds()/60)
-
-def total_work_minutes_for_brygada(brygada):
-    start,end=st.session_state.working_hours[brygada]
-    return minutes_between(datetime.combine(date.today(),start),datetime.combine(date.today(),end))
-
-def daily_used_minutes(brygada,day):
-    return sum(s["duration_min"] for s in get_day_slots_for_brygada(brygada,day))
-
-def compute_utilization_for_day(brygada,day):
-    used = daily_used_minutes(brygada,day)
-    total = total_work_minutes_for_brygada(brygada)
-    return used/total if total>0 else 0
-
-def week_days_containing(day):
-    monday = day - timedelta(days=day.weekday())
-    return [monday + timedelta(days=i) for i in range(7)]
-
-def used_minutes_for_week(brygada,any_day_in_week):
-    return sum(daily_used_minutes(brygada,d) for d in week_days_containing(any_day_in_week))
-
-def get_week_days(ref_date):
-    monday = ref_date - timedelta(days=ref_date.weekday())
-    return [monday + timedelta(days=i) for i in range(7)]
+def schedule_client_immediately(client_name, slot_type_name, day, pref_start, pref_end):
+    slot_type = next((s for s in st.session_state.slot_types if s["name"]==slot_type_name), None)
+    if not slot_type:
+        return False, None
+    dur = timedelta(minutes=slot_type["minutes"])
+    candidates=[]
+    for b in st.session_state.brygady:
+        existing=get_day_slots_for_brygada(b, day)
+        wh_start, wh_end = st.session_state.working_hours[b]
+        start_dt=datetime.combine(day, max(pref_start, wh_start))
+        end_dt=datetime.combine(day, min(pref_end, wh_end))
+        t=start_dt
+        while t+dur <= end_dt:
+            overlap=any(not(t+dur <= s["start"] or t >= s["end"]) for s in existing)
+            if not overlap:
+                candidates.append((b,t,t+dur))
+            t += timedelta(minutes=15)
+    if not candidates:
+        return False, None
+    brygada, start, end = candidates[0]
+    slot={"start":start,"end":end,"slot_type":slot_type_name,"duration_min":slot_type["minutes"],"client":client_name}
+    add_slot_to_brygada(brygada, day, slot)
+    return True, slot
 
 # ===================== PREDEFINED SLOTS =====================
 PREFERRED_SLOTS={
@@ -177,81 +171,9 @@ PREFERRED_SLOTS={
     "16:00-20:00": (time(16,0),time(20,0))
 }
 
-# ===================== HEURISTIC SLOT SELECTION =====================
-def find_best_slot(client_name, slot_type_name, day, pref_range_label):
-    stype = next((s for s in st.session_state.slot_types if s["name"]==slot_type_name), None)
-    if not stype:
-        return None
-    dur_min = stype["minutes"]
-    pref_start, pref_end = PREFERRED_SLOTS[pref_range_label]
-    pref_start_dt = datetime.combine(day,pref_start)
-    pref_end_dt = datetime.combine(day,pref_end)
-    window_len = max(1, minutes_between(pref_start_dt,pref_end_dt))
-
-    base_minutes_day = {b: daily_used_minutes(b,day) for b in st.session_state.brygady}
-    work_map_day = {b: total_work_minutes_for_brygada(b) for b in st.session_state.brygady}
-    week_days = week_days_containing(day)
-    base_minutes_week = {b: used_minutes_for_week(b,day) for b in st.session_state.brygady}
-    work_map_week = {b: work_map_day[b]*len(week_days) for b in st.session_state.brygady}
-
-    candidates=[]
-    for b in st.session_state.brygady:
-        day_start_dt = datetime.combine(day,st.session_state.working_hours[b][0])
-        day_end_dt = datetime.combine(day,st.session_state.working_hours[b][1])
-        if pref_end_dt<=day_start_dt or pref_start_dt>=day_end_dt:
-            continue
-        slots = get_day_slots_for_brygada(b,day)
-        intervals=[]
-        if not slots:
-            intervals.append((day_start_dt,day_end_dt))
-        else:
-            intervals.append((day_start_dt,slots[0]["start"]))
-            for i in range(len(slots)-1):
-                intervals.append((slots[i]["end"],slots[i+1]["start"]))
-            intervals.append((slots[-1]["end"],day_end_dt))
-        for iv_start,iv_end in intervals:
-            if minutes_between(iv_start,iv_end)<dur_min:
-                continue
-            candidate_start = max(iv_start,pref_start_dt,day_start_dt)
-            latest_start = min(iv_end - timedelta(minutes=dur_min),pref_end_dt - timedelta(minutes=dur_min),day_end_dt - timedelta(minutes=dur_min))
-            if candidate_start>latest_start:
-                continue
-            start_candidate=candidate_start
-            end_candidate=start_candidate+timedelta(minutes=dur_min)
-            delay_min = max(0, minutes_between(pref_start_dt,start_candidate))
-            delay_norm = delay_min/window_len
-            idle_before = minutes_between(iv_start,start_candidate)
-            idle_after = minutes_between(end_candidate,iv_end)
-            gap_total = idle_before+idle_after
-            work_total_minutes_day = work_map_day[b]
-            gap_norm = gap_total/work_total_minutes_day if work_total_minutes_day>0 else 0
-            if st.session_state.balance_horizon=="day":
-                mins_after={bb: base_minutes_day[bb] for bb in st.session_state.brygady}
-                mins_after[b]+=dur_min
-                util_list=[mins_after[bb]/work_map_day[bb] if work_map_day[bb]>0 else 0 for bb in st.session_state.brygady]
-            else:
-                mins_after={bb: base_minutes_week[bb] for bb in st.session_state.brygady}
-                mins_after[b]+=dur_min
-                util_list=[mins_after[bb]/work_map_week[bb] if work_map_week[bb]>0 else 0 for bb in st.session_state.brygady]
-            fairness_std = pstdev(util_list) if len(util_list)>1 else 0
-            W=st.session_state.heur_weights
-            score = W["delay"]*delay_norm + W["gap"]*gap_norm + W["balance"]*fairness_std
-            candidates.append((score,delay_min,start_candidate,end_candidate,b))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda x:(x[0],x[1],x[2]))
-    best=candidates[0]
-    return {"brygada":best[4],"start":best[2],"end":best[3],"score":best[0]}
-
-def schedule_client(client_name, slot_type_name, day, pref_range_label):
-    res = find_best_slot(client_name, slot_type_name, day, pref_range_label)
-    if not res:
-        return False,None
-    slot={"start":res["start"],"end":res["end"],"slot_type":slot_type_name,
-          "duration_min":(res["end"]-res["start"]).seconds//60,
-          "client":client_name,"pref_range":pref_range_label}
-    add_slot_to_brygada(res["brygada"],day,slot)
-    return True,res
+def get_week_days(reference_day):
+    monday = reference_day - timedelta(days=reference_day.weekday())
+    return [monday + timedelta(days=i) for i in range(7)]
 
 # ===================== UI =====================
 st.title("📅 Harmonogram slotów - Tydzień")
@@ -272,16 +194,6 @@ with st.sidebar:
         end_t=st.time_input(f"Koniec {b}",value=st.session_state.working_hours[b][1],key=f"{b}_end")
         st.session_state.working_hours[b]=(start_t,end_t)
 
-    st.subheader("Heurystyka")
-    d = st.slider("Delay",0.0,1.0,st.session_state.heur_weights["delay"])
-    g = st.slider("Gap",0.0,1.0,st.session_state.heur_weights["gap"])
-    bal = st.slider("Balance",0.0,1.0,st.session_state.heur_weights["balance"])
-    s=d+g+bal
-    if s==0:
-        st.session_state.heur_weights={"delay":0.34,"gap":0.33,"balance":0.33}
-    else:
-        st.session_state.heur_weights={"delay":d/s,"gap":g/s,"balance":bal/s}
-
     if st.button("🗑️ Wyczyść harmonogram"):
         st.session_state.schedules={b:{} for b in st.session_state.brygady}
         st.session_state.clients_added=[]
@@ -290,42 +202,50 @@ with st.sidebar:
         save_state_to_json()
         st.success("Harmonogram wyczyszczony.")
 
-# ===================== WEEK NAVIGATION =====================
+# ===================== WEEK NAVIGATION WITH BUTTONS =====================
 if "week_offset" not in st.session_state:
-    st.session_state.week_offset = 0
+    st.session_state.week_offset = 0  # 0 = bieżący tydzień
 
 st.sidebar.subheader("⬅️ Wybór tygodnia")
-col1,col2 = st.sidebar.columns(2)
+col1, col2 = st.sidebar.columns(2)
 if col1.button("‹ Poprzedni tydzień"):
-    st.session_state.week_offset-=1
+    st.session_state.week_offset -= 1
 if col2.button("Następny tydzień ›"):
-    st.session_state.week_offset+=1
+    st.session_state.week_offset += 1
 
 week_ref = date.today() + timedelta(weeks=st.session_state.week_offset)
 week_days = get_week_days(week_ref)
+st.sidebar.write(f"Tydzień: {week_days[0].strftime('%d-%m-%Y')} – {week_days[-1].strftime('%d-%m-%Y')}")
 
 # ===================== ADD CLIENT =====================
 st.subheader("➕ Dodaj klienta")
 with st.form("add_client_form"):
-    client_default=f"Klient {st.session_state.client_counter}"
-    client_name=st.text_input("Nazwa klienta",value=client_default)
+    default_client=f"Klient {st.session_state.client_counter}"
+    client_name=st.text_input("Nazwa klienta",value=default_client)
+    auto_type=weighted_choice(st.session_state.slot_types) if st.session_state.slot_types else "Standard"
+    auto_pref=random.choice(list(PREFERRED_SLOTS.keys()))
+    st.info(f"Automatycznie wybrano: **{auto_type}**, Wybrany slot: **{auto_pref}**")
     slot_type_name=st.selectbox("Typ slotu",[s["name"] for s in st.session_state.slot_types],
-                                index=random.randint(0,len(st.session_state.slot_types)-1))
-    pref_range_label=random.choice(list(PREFERRED_SLOTS.keys()))
-    pref_range_label=st.selectbox("Preferowany przedział",list(PREFERRED_SLOTS.keys()),
-                                  index=list(PREFERRED_SLOTS.keys()).index(pref_range_label))
-    day=st.date_input("Dzień",value=random.choice(week_days))
+                                index=[s["name"] for s in st.session_state.slot_types].index(auto_type))
+    pref_range_label=st.radio("Preferowany przedział czasowy",list(PREFERRED_SLOTS.keys()),
+                              index=list(PREFERRED_SLOTS.keys()).index(auto_pref))
+    pref_start,pref_end=PREFERRED_SLOTS[pref_range_label]
+    day=st.date_input("Dzień",value=date.today())
     submitted=st.form_submit_button("Dodaj")
     if submitted:
-        ok,res=schedule_client(client_name,slot_type_name,day,pref_range_label)
+        ok,info=schedule_client_immediately(client_name,slot_type_name,day,pref_start,pref_end)
         if ok:
-            st.success(f"Klient {client_name} dodany do {res['brygada']} {res['start'].strftime('%H:%M')}-{res['end'].strftime('%H:%M')}")
-            st.session_state.clients_added.append({"client":client_name,"slot":slot_type_name,"day":str(day),"pref_range":pref_range_label})
+            for b in st.session_state.schedules:
+                for d,slots in st.session_state.schedules[b].items():
+                    for s in slots:
+                        if s["client"]==client_name and s["start"]==info["start"]:
+                            s["pref_range"]=pref_range_label
+            st.session_state.clients_added.append({"client":client_name,"slot_type":slot_type_name,"pref_range":pref_range_label})
+            st.success(f"✅ {client_name} dodany ({slot_type_name}, {pref_range_label})")
             st.session_state.client_counter+=1
         else:
-            st.error("Nie znaleziono wolnego slotu.")
             st.session_state.not_found_counter+=1
-        save_state_to_json()
+            st.error("❌ Brak miejsca w tym przedziale.")
 
 # ===================== SCHEDULE TABLE =====================
 all_slots=[]
@@ -335,42 +255,56 @@ for b in st.session_state.brygady:
         slots=st.session_state.schedules.get(b,{}).get(d_str,[])
         for s in slots:
             all_slots.append({
-                "Brygada":b,
-                "Dzień":d_str,
-                "Klient":s["client"],
-                "Typ":s["slot_type"],
-                "Preferencja":s.get("pref_range",""),
-                "Start":s["start"],
-                "Koniec":s["end"],
-                "Czas [min]":s["duration_min"]
+                "Brygada":b,"Dzień":d_str,"Klient":s["client"],
+                "Typ":s["slot_type"],"Wybrany slot":s.get("pref_range",""),
+                "Start":s["start"],"Koniec":s["end"],"Czas [min]":s["duration_min"]
             })
 df=pd.DataFrame(all_slots)
 st.subheader("📋 Tabela harmonogramu")
 st.dataframe(df)
 
-# ===================== UTILIZATION =====================
-st.subheader("📊 Wykorzystanie brygad (%)")
-util_data=[]
-for b in st.session_state.brygady:
-    row=[]
-    for d in week_days:
-        row.append(round(compute_utilization_for_day(b,d)*100,1))
-    util_data.append(row)
-util_df=pd.DataFrame(util_data,index=st.session_state.brygady,
-                     columns=[d.strftime("%a %d-%m") for d in week_days])
-st.dataframe(util_df)
-
-st.write(f"Nie znaleziono slotów: {st.session_state.not_found_counter}")
-
 # ===================== GANTT =====================
 if not df.empty:
-    st.subheader("📈 Wykres Gantta")
-    fig=px.timeline(df,x_start="Start",x_end="Koniec",y="Brygada",color="Klient",
-                    hover_data=["Typ","Preferencja"])
+    st.subheader("📊 Wykres Gantta - tydzień")
+    fig=px.timeline(df,x_start="Start",x_end="Koniec",y="Brygada",color="Klient",hover_data=["Typ","Wybrany slot"])
     fig.update_yaxes(autorange="reversed")
-    # Linie podziału slotów
-    for slot_label,(s_start,s_end) in PREFERRED_SLOTS.items():
-        for d in week_days:
-            fig.add_vline(x=datetime.combine(d,s_start),line=dict(color="gray",dash="dot"))
-            fig.add_vline(x=datetime.combine(d,s_end),line=dict(color="gray",dash="dot"))
+    # rysowanie predefiniowanych slotów dla każdego dnia tygodnia
+    for d in week_days:
+        for label,(s,e) in PREFERRED_SLOTS.items():
+            fig.add_vrect(x0=datetime.combine(d,s),x1=datetime.combine(d,e),
+                          fillcolor="rgba(200,200,200,0.15)",opacity=0.2,layer="below",line_width=0)
+            fig.add_vline(x=datetime.combine(d,s),line_width=1,line_dash="dot",line_color="black")
+            fig.add_vline(x=datetime.combine(d,e),line_width=1,line_dash="dot",line_color="black")
     st.plotly_chart(fig,use_container_width=True)
+
+# ===================== SUMMARY =====================
+st.subheader("📌 Podsumowanie")
+st.write(f"✅ Dodano klientów: {len(st.session_state.clients_added)}")
+st.write(f"❌ Brak slotu dla: {st.session_state.not_found_counter}")
+
+# ===================== UTILIZATION PER DAY =====================
+st.subheader("📊 Wykorzystanie brygad w podziale na dni (%)")
+util_data=[]
+for b in st.session_state.brygady:
+    row={"Brygada":b}
+    wh_start,wh_end=st.session_state.working_hours[b]
+    daily_minutes=(datetime.combine(date.today(),wh_end)-datetime.combine(date.today(),wh_start)).seconds//60
+    for d in week_days:
+        d_str=d.strftime("%Y-%m-%d")
+        slots=st.session_state.schedules.get(b,{}).get(d_str,[])
+        used=sum(s["duration_min"] for s in slots)
+        row[d_str]=round(100*used/daily_minutes,1) if daily_minutes>0 else 0
+    util_data.append(row)
+st.dataframe(pd.DataFrame(util_data))
+
+# ===================== TOTAL UTILIZATION =====================
+st.subheader("📊 Wykorzystanie brygad (sumarycznie)")
+rows=[]
+for b in st.session_state.brygady:
+    total=sum(s["duration_min"] for d in st.session_state.schedules.get(b,{}).values() for s in d)
+    wh_start,wh_end=st.session_state.working_hours[b]
+    daily_minutes=(datetime.combine(date.today(),wh_end)-datetime.combine(date.today(),wh_start)).seconds//60
+    available=daily_minutes*len(week_days)
+    utilization=round(100*total/available,1)
+    rows.append({"Brygada":b,"Zajętość [min]":total,"Dostępne [min]":available,"Wykorzystanie [%]":utilization})
+st.table(pd.DataFrame(rows))
