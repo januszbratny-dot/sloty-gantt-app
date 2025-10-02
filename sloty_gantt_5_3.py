@@ -228,21 +228,38 @@ with st.form("add_client_form"):
     default_client_name = f"Klient {st.session_state.client_counter}"
     client_name = st.text_input("Nazwa klienta", value=default_client_name)
 
+    # Losowanie typu slotu
     if st.session_state.slot_types:
-        slot_type_name = weighted_choice(st.session_state.slot_types)
+        auto_slot_type_name = weighted_choice(st.session_state.slot_types)
     else:
-        slot_type_name = "Standard"
+        auto_slot_type_name = "Standard"
+
+    # Losowanie przedziału preferencji
+    auto_pref_range_label = random.choice(list(PREFERRED_SLOTS.keys()))
+    auto_pref_start, auto_pref_end = PREFERRED_SLOTS[auto_pref_range_label]
+
+    st.info(f"Automatycznie wybrano: **{auto_slot_type_name}**, preferencja: **{auto_pref_range_label}**")
+
+    # Możliwość ręcznej zmiany
+    slot_type_name = st.selectbox(
+        "Wybierz typ slotu (możesz zmienić wylosowany)",
+        [s["name"] for s in st.session_state.slot_types],
+        index=[s["name"] for s in st.session_state.slot_types].index(auto_slot_type_name)
+        if auto_slot_type_name in [s["name"] for s in st.session_state.slot_types] else 0
+    )
+
+    pref_range_label = st.radio(
+        "Wybierz preferowany przedział czasowy",
+        list(PREFERRED_SLOTS.keys()),
+        index=list(PREFERRED_SLOTS.keys()).index(auto_pref_range_label)
+    )
+
+    pref_start, pref_end = PREFERRED_SLOTS[pref_range_label]
 
     day = st.date_input("Dzień", value=date.today())
 
-    pref_range_label = random.choice(list(PREFERRED_SLOTS.keys()))
-    pref_start, pref_end = PREFERRED_SLOTS[pref_range_label]
-
-    st.write(f"Automatycznie wybrano: **{slot_type_name}**, preferencja: **{pref_range_label}**")
-
     submitted = st.form_submit_button("Dodaj")
     if submitted:
-        from copy import deepcopy
         ok, info = schedule_client_immediately(client_name, slot_type_name, day, pref_start, pref_end)
         if ok:
             # dopisanie przedziału do slotu
@@ -256,6 +273,7 @@ with st.form("add_client_form"):
             st.session_state.client_counter += 1
         else:
             st.error("Nie udało się znaleźć miejsca.")
+
 
 # ===================== TABELA I WYKRESY =====================
 
