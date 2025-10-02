@@ -1,14 +1,12 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import numpy as np
+import random
 import os
 import json
-import random
 from datetime import datetime, timedelta, date, time
 
 # ===================== PERSISTENCE =====================
-
 def schedules_to_jsonable():
     data = {}
     for b, days in st.session_state.schedules.items():
@@ -84,7 +82,6 @@ def load_state_from_json(filename="schedules.json"):
     return True
 
 # ===================== INITIALIZATION =====================
-
 if "slot_types" not in st.session_state:
     if not load_state_from_json():
         st.session_state.slot_types = [{"name": "Standard", "minutes": 60, "weight": 1}]
@@ -97,7 +94,6 @@ if "slot_types" not in st.session_state:
         st.session_state.not_found_counter = 0
 
 # ===================== HELPER FUNCTIONS =====================
-
 def parse_slot_types(text):
     out = []
     for line in text.splitlines():
@@ -136,10 +132,12 @@ def get_day_slots_for_brygada(brygada, day):
 
 def add_slot_to_brygada(brygada, day, slot):
     d = day.strftime("%Y-%m-%d")
+    if brygada not in st.session_state.schedules:
+        st.session_state.schedules[brygada] = {}
     if d not in st.session_state.schedules[brygada]:
         st.session_state.schedules[brygada][d] = []
-    st.session_state.schedules[b][d].append(slot)
-    st.session_state.schedules[b][d].sort(key=lambda s: s["start"])
+    st.session_state.schedules[brygada][d].append(slot)
+    st.session_state.schedules[brygada][d].sort(key=lambda s: s["start"])
     save_state_to_json()
 
 def schedule_client_immediately(client_name, slot_type_name, day, pref_start, pref_end):
@@ -150,24 +148,23 @@ def schedule_client_immediately(client_name, slot_type_name, day, pref_start, pr
     candidates=[]
     for b in st.session_state.brygady:
         existing=get_day_slots_for_brygada(b, day)
-        start_wh,end_wh = st.session_state.working_hours[b]
-        start_dt=datetime.combine(day, max(pref_start,start_wh))
-        end_dt=datetime.combine(day, min(pref_end,end_wh))
+        wh_start, wh_end = st.session_state.working_hours[b]
+        start_dt=datetime.combine(day, max(pref_start, wh_start))
+        end_dt=datetime.combine(day, min(pref_end, wh_end))
         t=start_dt
-        while t+dur<=end_dt:
-            overlap=any(not(t+dur<=s["start"] or t>=s["end"]) for s in existing)
+        while t+dur <= end_dt:
+            overlap=any(not(t+dur <= s["start"] or t >= s["end"]) for s in existing)
             if not overlap:
                 candidates.append((b,t,t+dur))
-            t+=timedelta(minutes=15)
+            t += timedelta(minutes=15)
     if not candidates:
-        return False,None
-    brygada,start,end=candidates[0]
+        return False, None
+    brygada, start, end = candidates[0]
     slot={"start":start,"end":end,"slot_type":slot_type_name,"duration_min":slot_type["minutes"],"client":client_name}
     add_slot_to_brygada(brygada, day, slot)
     return True, slot
 
 # ===================== PREDEFINED SLOTS =====================
-
 PREFERRED_SLOTS={
     "8:00-12:00": (time(8,0),time(12,0)),
     "12:00-16:00": (time(12,0),time(16,0)),
@@ -175,7 +172,6 @@ PREFERRED_SLOTS={
 }
 
 # ===================== UI =====================
-
 st.title("📅 Harmonogram slotów")
 
 with st.sidebar:
@@ -183,7 +179,7 @@ with st.sidebar:
     txt = st.text_area("Typy slotów (format: Nazwa, minuty, waga)",
                        value="\n".join(f"{s['name']},{s['minutes']},{s.get('weight',1)}" for s in st.session_state.slot_types))
     st.session_state.slot_types=parse_slot_types(txt)
-    
+
     txt_b = st.text_area("Lista brygad",value="\n".join(st.session_state.brygady))
     st.session_state.brygady=[line.strip() for line in txt_b.splitlines() if line.strip()]
     ensure_brygady_in_state(st.session_state.brygady)
@@ -203,7 +199,6 @@ with st.sidebar:
         st.success("Harmonogram wyczyszczony.")
 
 # ===================== ADD CLIENT =====================
-
 st.subheader("➕ Dodaj klienta")
 with st.form("add_client_form"):
     default_client=f"Klient {st.session_state.client_counter}"
@@ -234,7 +229,6 @@ with st.form("add_client_form"):
             st.error("❌ Brak miejsca w tym przedziale.")
 
 # ===================== SCHEDULE TABLE =====================
-
 all_slots=[]
 for b in st.session_state.brygady:
     for d,slots in st.session_state.schedules.get(b,{}).items():
@@ -249,12 +243,10 @@ st.subheader("📋 Tabela harmonogramu")
 st.dataframe(df)
 
 # ===================== GANTT =====================
-
 if not df.empty:
     st.subheader("📊 Wykres Gantta")
     fig=px.timeline(df,x_start="Start",x_end="Koniec",y="Brygada",color="Klient",hover_data=["Typ","Preferencja"])
     fig.update_yaxes(autorange="reversed")
-
     # przedziały czasowe
     colors=["rgba(200,200,200,0.15)"]*3
     for (label,(s,e)),col in zip(PREFERRED_SLOTS.items(),colors):
@@ -265,13 +257,11 @@ if not df.empty:
     st.plotly_chart(fig,use_container_width=True)
 
 # ===================== SUMMARY =====================
-
 st.subheader("📌 Podsumowanie")
 st.write(f"✅ Dodano klientów: {len(st.session_state.clients_added)}")
 st.write(f"❌ Brak slotu dla: {st.session_state.not_found_counter}")
 
 # ===================== UTILIZATION PER DAY =====================
-
 st.subheader("📊 Wykorzystanie brygad w podziale na dni (%)")
 all_days=set()
 for b in st.session_state.brygady:
@@ -290,7 +280,6 @@ for b in st.session_state.brygady:
 st.dataframe(pd.DataFrame(util_data))
 
 # ===================== TOTAL UTILIZATION =====================
-
 st.subheader("📊 Wykorzystanie brygad (sumarycznie)")
 rows=[]
 for b in st.session_state.brygady:
