@@ -49,7 +49,6 @@ def load_state_from_json(filename="schedules.json"):
 
     st.session_state.slot_types = data.get("slot_types", [])
     st.session_state.brygady = data.get("brygady", [])
-    from datetime import time
 
     def parse_time_str(t):
         try:
@@ -270,6 +269,14 @@ with st.sidebar:
         save_state_to_json()
         st.success("Harmonogram wyczyszczony i zapisany.")
 
+# ===================== PREDEFINIOWANE PRZEDZIAŁY =====================
+
+PREFERRED_SLOTS = {
+    "8:00-12:00": (time(8, 0), time(12, 0)),
+    "12:00-16:00": (time(12, 0), time(16, 0)),
+    "16:00-20:00": (time(16, 0), time(20, 0)),
+}
+
 # ===================== DODAWANIE KLIENTA =====================
 
 st.subheader("Dodaj klienta")
@@ -277,13 +284,24 @@ with st.form("add_client_form"):
     client_name = st.text_input("Nazwa klienta")
     slot_type_name = st.selectbox("Typ slotu", [s["name"] for s in st.session_state.slot_types])
     day = st.date_input("Dzień", value=date.today())
-    pref_start = st.time_input("Preferowany start", value=time(9, 0))
-    pref_end = st.time_input("Preferowany koniec", value=time(12, 0))
+    
+    pref_range_label = st.selectbox("Preferowany przedział czasowy", list(PREFERRED_SLOTS.keys()))
+    pref_start, pref_end = PREFERRED_SLOTS[pref_range_label]
+
     submitted = st.form_submit_button("Dodaj")
     if submitted:
         ok, info = schedule_client_immediately(client_name, slot_type_name, day, pref_start, pref_end)
         if ok:
-            st.success(f"Klient {client_name} dodany do {info['brygada']} {info['start'].strftime('%H:%M')}-{info['end'].strftime('%H:%M')}")
+            st.session_state.clients_added.append({
+                "Klient": client_name,
+                "Typ slotu": slot_type_name,
+                "Dzień": str(day),
+                "Preferencja": pref_range_label,
+                "Brygada": info["brygada"],
+                "Start": info["start"].strftime("%H:%M"),
+                "Koniec": info["end"].strftime("%H:%M")
+            })
+            st.success(f"Klient {client_name} dodany do {info['brygada']} {info['start'].strftime('%H:%M')}-{info['end'].strftime('%H:%M')} (preferencja: {pref_range_label})")
         else:
             st.error("Nie udało się znaleźć miejsca.")
 
@@ -293,6 +311,11 @@ all_slots = []
 for b in st.session_state.brygady:
     for d, slots in st.session_state.schedules.get(b, {}).items():
         for s in slots:
+            pref_range = None
+            for ca in st.session_state.clients_added:
+                if ca["Klient"] == s["client"] and ca["Dzień"] == d:
+                    pref_range = ca["Preferencja"]
+                    break
             all_slots.append({
                 "Brygada": b,
                 "Dzień": d,
@@ -300,7 +323,8 @@ for b in st.session_state.brygady:
                 "Typ": s["slot_type"],
                 "Start": s["start"],
                 "Koniec": s["end"],
-                "Czas [min]": s["duration_min"]
+                "Czas [min]": s["duration_min"],
+                "Preferencja klienta": pref_range
             })
 
 df = pd.DataFrame(all_slots)
@@ -309,7 +333,7 @@ st.dataframe(df)
 
 if not df.empty:
     st.subheader("Wykres Gantta")
-    fig = px.timeline(df, x_start="Start", x_end="Koniec", y="Brygada", color="Klient", hover_data=["Typ"])
+    fig = px.timeline(df, x_start="Start", x_end="Koniec", y="Brygada", color="Klient", hover_data=["Typ", "Preferencja klienta"])
     fig.update_yaxes(autorange="reversed")
     st.plotly_chart(fig, use_container_width=True)
 
