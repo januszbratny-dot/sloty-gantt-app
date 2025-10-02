@@ -314,8 +314,10 @@ if not df.empty:
 
     # Dodajemy linie pionowe dla przedziałów czasowych
     for slot_label, (s, e) in PREFERRED_SLOTS.items():
-        fig.add_vline(x=datetime.combine(date.today(), s), line=dict(color="gray", dash="dot"), annotation_text=slot_label.split("-")[0])
-        fig.add_vline(x=datetime.combine(date.today(), e), line=dict(color="gray", dash="dot"), annotation_text=slot_label.split("-")[1])
+        fig.add_vline(x=datetime.combine(date.today(), s), line=dict(color="gray", dash="dot"), annotation=dict(text=slot_label.split("-")[0], showarrow=False, y=1, yref="paper"))
+        fig.add_vline(x=datetime.combine(date.today(), e), line=dict(color="gray", dash="dot"), annotation=dict(text=slot_label.split("-")[1], showarrow=False, y=1, yref="paper"))
+
+        
 
     st.plotly_chart(fig, use_container_width=True)
 
