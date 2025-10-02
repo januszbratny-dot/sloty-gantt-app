@@ -100,7 +100,7 @@ if "slot_types" not in st.session_state:
         st.session_state.client_counter = 1
         st.session_state.not_found_counter = 0
 
-# ===================== FUNKCJE POMOCNICZE =====================
+# ===================== FUNKCJE =====================
 
 def parse_slot_types(text):
     out = []
@@ -149,10 +149,6 @@ def add_slot_to_brygada(brygada, day, slot):
     lst.sort(key=lambda s: s["start"])
     save_state_to_json()
 
-def total_work_minutes_for_brygada(brygada):
-    start_t, end_t = st.session_state.working_hours[brygada]
-    return int((datetime.combine(date.today(), end_t) - datetime.combine(date.today(), start_t)).total_seconds() / 60)
-
 # ===================== HEURYSTYKA =====================
 
 def schedule_client_immediately(client_name, slot_type_name, day, pref_start, pref_end):
@@ -199,18 +195,17 @@ PREFERRED_SLOTS = {
 
 # ===================== INTERFEJS =====================
 
-st.title("Harmonogram slotów (z persystencją JSON)")
+st.title("📅 Harmonogram slotów")
 
 with st.sidebar:
-    st.subheader("Konfiguracja slotów")
+    st.subheader("⚙️ Konfiguracja")
     txt = st.text_area(
         "Typy slotów (format: Nazwa, minuty, waga)",
         value="\n".join(f"{s['name']}, {s['minutes']}, {s.get('weight',1)}" for s in st.session_state.slot_types)
     )
     st.session_state.slot_types = parse_slot_types(txt)
 
-    st.subheader("Brygady")
-    txt_b = st.text_area("Lista brygad (po jednej w linii)", value="\n".join(st.session_state.brygady))
+    txt_b = st.text_area("Lista brygad", value="\n".join(st.session_state.brygady))
     st.session_state.brygady = [line.strip() for line in txt_b.splitlines() if line.strip()]
     ensure_brygady_in_state(st.session_state.brygady)
 
@@ -220,55 +215,30 @@ with st.sidebar:
         end_t = st.time_input(f"Koniec {b}", value=st.session_state.working_hours[b][1], key=f"{b}_end")
         st.session_state.working_hours[b] = (start_t, end_t)
 
-    st.subheader("Wagi heurystyki")
-    d = st.slider("Delay", 0.0, 1.0, st.session_state.heur_weights["delay"])
-    g = st.slider("Gap", 0.0, 1.0, st.session_state.heur_weights["gap"])
-    bal = st.slider("Balance", 0.0, 1.0, st.session_state.heur_weights["balance"])
-    s = d + g + bal
-    if s == 0:
-        st.session_state.heur_weights = {"delay": 0.34, "gap": 0.33, "balance": 0.33}
-    else:
-        st.session_state.heur_weights = {"delay": d/s, "gap": g/s, "balance": bal/s}
-
-    st.session_state.balance_horizon = st.selectbox("Horyzont równomierności", ["week", "day"], index=0 if st.session_state.balance_horizon=="week" else 1)
-
-    if st.button("Wyczyść harmonogram"):
+    if st.button("🗑️ Wyczyść harmonogram"):
         st.session_state.schedules = {b: {} for b in st.session_state.brygady}
         st.session_state.clients_added = []
         st.session_state.client_counter = 1
         st.session_state.not_found_counter = 0
         save_state_to_json()
-        st.success("Harmonogram wyczyszczony i zapisany.")
+        st.success("Harmonogram wyczyszczony.")
 
 # ===================== DODAWANIE KLIENTA =====================
 
-st.subheader("Dodaj klienta")
+st.subheader("➕ Dodaj klienta")
 with st.form("add_client_form"):
     default_client_name = f"Klient {st.session_state.client_counter}"
     client_name = st.text_input("Nazwa klienta", value=default_client_name)
 
-    if st.session_state.slot_types:
-        auto_slot_type_name = weighted_choice(st.session_state.slot_types)
-    else:
-        auto_slot_type_name = "Standard"
-
+    auto_slot_type_name = weighted_choice(st.session_state.slot_types) if st.session_state.slot_types else "Standard"
     auto_pref_range_label = random.choice(list(PREFERRED_SLOTS.keys()))
 
     st.info(f"Automatycznie wybrano: **{auto_slot_type_name}**, preferencja: **{auto_pref_range_label}**")
 
-    slot_type_name = st.selectbox(
-        "Wybierz typ slotu",
-        [s["name"] for s in st.session_state.slot_types],
-        index=[s["name"] for s in st.session_state.slot_types].index(auto_slot_type_name)
-        if auto_slot_type_name in [s["name"] for s in st.session_state.slot_types] else 0
-    )
-
-    pref_range_label = st.radio(
-        "Wybierz preferowany przedział czasowy",
-        list(PREFERRED_SLOTS.keys()),
-        index=list(PREFERRED_SLOTS.keys()).index(auto_pref_range_label)
-    )
-
+    slot_type_name = st.selectbox("Typ slotu", [s["name"] for s in st.session_state.slot_types],
+                                  index=[s["name"] for s in st.session_state.slot_types].index(auto_slot_type_name))
+    pref_range_label = st.radio("Preferowany przedział czasowy", list(PREFERRED_SLOTS.keys()),
+                                index=list(PREFERRED_SLOTS.keys()).index(auto_pref_range_label))
     pref_start, pref_end = PREFERRED_SLOTS[pref_range_label]
     day = st.date_input("Dzień", value=date.today())
 
@@ -282,13 +252,13 @@ with st.form("add_client_form"):
                         if s["client"] == client_name and s["start"] == info["start"]:
                             s["pref_range"] = pref_range_label
             st.session_state.clients_added.append({"client": client_name, "slot_type": slot_type_name, "pref_range": pref_range_label})
-            st.success(f"Klient {client_name} dodany ({slot_type_name}, {pref_range_label})")
+            st.success(f"✅ {client_name} dodany ({slot_type_name}, {pref_range_label})")
             st.session_state.client_counter += 1
         else:
             st.session_state.not_found_counter += 1
-            st.error("Nie udało się znaleźć miejsca.")
+            st.error("❌ Brak miejsca w tym przedziale.")
 
-# ===================== TABELA I WYKRESY =====================
+# ===================== TABELA I WYKRES =====================
 
 all_slots = []
 for b in st.session_state.brygady:
@@ -306,35 +276,46 @@ for b in st.session_state.brygady:
             })
 
 df = pd.DataFrame(all_slots)
-st.subheader("Tabela harmonogramu")
+st.subheader("📋 Tabela harmonogramu")
 st.dataframe(df)
 
 if not df.empty:
-    st.subheader("Wykres Gantta")
-    fig = px.timeline(df, x_start="Start", x_end="Koniec", y="Brygada", color="Klient", hover_data=["Typ", "Preferencja"])
+    st.subheader("📊 Wykres Gantta")
+    fig = px.timeline(df, x_start="Start", x_end="Koniec", y="Brygada",
+                      color="Klient", hover_data=["Typ", "Preferencja"])
     fig.update_yaxes(autorange="reversed")
 
-    # Dodajemy kolorowe pasy dla przedziałów czasowych
-    colors = ["rgba(200,200,200,0.1)", "rgba(200,200,200,0.15)", "rgba(200,200,200,0.1)"]
+    # Dodajemy półprzezroczyste pasy + linie graniczne
+    colors = ["rgba(200,200,200,0.15)", "rgba(200,200,200,0.15)", "rgba(200,200,200,0.15)"]
     for (slot_label, (s, e)), col in zip(PREFERRED_SLOTS.items(), colors):
-        fig.add_vrect(
-            x0=datetime.combine(date.today(), s),
-            x1=datetime.combine(date.today(), e),
-            fillcolor=col, opacity=0.3, layer="below", line_width=0
-        )
-        # Dodaj podpis
-        fig.add_annotation(
-            x=datetime.combine(date.today(), s) + (datetime.combine(date.today(), e) - datetime.combine(date.today(), s)) / 2,
-            y=1.05, xref="x", yref="paper",
-            text=slot_label, showarrow=False, font=dict(size=10, color="gray")
-        )
+        fig.add_vrect(x0=datetime.combine(date.today(), s),
+                      x1=datetime.combine(date.today(), e),
+                      fillcolor=col, opacity=0.2, layer="below", line_width=0)
+        fig.add_vline(x=datetime.combine(date.today(), s), line_width=1, line_dash="dot", line_color="black")
+        fig.add_vline(x=datetime.combine(date.today(), e), line_width=1, line_dash="dot", line_color="black")
 
     st.plotly_chart(fig, use_container_width=True)
 
-st.subheader("Historia dodawania")
-st.dataframe(pd.DataFrame(st.session_state.clients_added))
-
 # ===================== PODSUMOWANIE =====================
-st.subheader("Podsumowanie")
+
+st.subheader("📌 Podsumowanie")
 st.write(f"✅ Dodano klientów: {len(st.session_state.clients_added)}")
-st.write(f"❌ Nie udało się znaleźć slotu dla: {st.session_state.not_found_counter}")
+st.write(f"❌ Brak slotu dla: {st.session_state.not_found_counter}")
+
+# ===================== WYKORZYSTANIE BRYGAD =====================
+
+st.subheader("📊 Wykorzystanie brygad (%)")
+rows = []
+for b in st.session_state.brygady:
+    total = 0
+    for d, slots in st.session_state.schedules.get(b, {}).items():
+        for s in slots:
+            total += s["duration_min"]
+    wh_start, wh_end = st.session_state.working_hours[b]
+    daily_minutes = (datetime.combine(date.today(), wh_end) - datetime.combine(date.today(), wh_start)).seconds // 60
+    days_count = len(st.session_state.schedules.get(b, {}))
+    available = daily_minutes * days_count if days_count > 0 else 1
+    utilization = round(100 * total / available, 1)
+    rows.append({"Brygada": b, "Zajętość [min]": total, "Dostępne [min]": available, "Wykorzystanie [%]": utilization})
+
+st.table(pd.DataFrame(rows))
