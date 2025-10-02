@@ -281,7 +281,11 @@ with st.form("add_client_form"):
                     for s in slots:
                         if s["client"] == client_name and s["start"] == info["start"]:
                             s["pref_range"] = pref_range_label
-            st.session_state.clients_added.append({"client": client_name, "slot_type": slot_type_name, "pref_range": pref_range_label})
+            st.session_state.clients_added.append({
+                "client": client_name,
+                "slot_type": slot_type_name,
+                "pref_range": pref_range_label
+            })
             st.success(f"Klient {client_name} dodany ({slot_type_name}, {pref_range_label})")
             st.session_state.client_counter += 1
         else:
