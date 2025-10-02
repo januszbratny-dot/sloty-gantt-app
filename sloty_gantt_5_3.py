@@ -202,11 +202,20 @@ with st.sidebar:
         save_state_to_json()
         st.success("Harmonogram wyczyszczony.")
 
-# ===================== WEEK NAVIGATION =====================
-st.subheader("⬅️ Wybór tygodnia")
-week_offset = st.number_input("Tydzień (0 = bieżący, 1 = następny, -1 = poprzedni)", value=0, step=1)
-week_ref = date.today() + timedelta(weeks=week_offset)
+# ===================== WEEK NAVIGATION WITH BUTTONS =====================
+if "week_offset" not in st.session_state:
+    st.session_state.week_offset = 0  # 0 = bieżący tydzień
+
+st.sidebar.subheader("⬅️ Wybór tygodnia")
+col1, col2 = st.sidebar.columns(2)
+if col1.button("‹ Poprzedni tydzień"):
+    st.session_state.week_offset -= 1
+if col2.button("Następny tydzień ›"):
+    st.session_state.week_offset += 1
+
+week_ref = date.today() + timedelta(weeks=st.session_state.week_offset)
 week_days = get_week_days(week_ref)
+st.sidebar.write(f"Tydzień: {week_days[0].strftime('%d-%m-%Y')} – {week_days[-1].strftime('%d-%m-%Y')}")
 
 # ===================== ADD CLIENT =====================
 st.subheader("➕ Dodaj klienta")
@@ -295,7 +304,6 @@ for b in st.session_state.brygady:
     total=sum(s["duration_min"] for d in st.session_state.schedules.get(b,{}).values() for s in d)
     wh_start,wh_end=st.session_state.working_hours[b]
     daily_minutes=(datetime.combine(date.today(),wh_end)-datetime.combine(date.today(),wh_start)).seconds//60
-    days_count=len([d for d in week_days if st.session_state.schedules.get(b,{}).get(d.strftime("%Y-%m-%d"),[])])
     available=daily_minutes*len(week_days)
     utilization=round(100*total/available,1)
     rows.append({"Brygada":b,"Zajętość [min]":total,"Dostępne [min]":available,"Wykorzystanie [%]":utilization})
