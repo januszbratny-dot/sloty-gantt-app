@@ -224,7 +224,7 @@ with st.form("add_client_form"):
     client_name=st.text_input("Nazwa klienta",value=default_client)
     auto_type=weighted_choice(st.session_state.slot_types) if st.session_state.slot_types else "Standard"
     auto_pref=random.choice(list(PREFERRED_SLOTS.keys()))
-    st.info(f"Automatycznie wybrano: **{auto_type}**, preferencja: **{auto_pref}**")
+    st.info(f"Automatycznie wybrano: **{auto_type}**, Wybrany slot: **{auto_pref}**")
     slot_type_name=st.selectbox("Typ slotu",[s["name"] for s in st.session_state.slot_types],
                                 index=[s["name"] for s in st.session_state.slot_types].index(auto_type))
     pref_range_label=st.radio("Preferowany przedział czasowy",list(PREFERRED_SLOTS.keys()),
@@ -256,7 +256,7 @@ for b in st.session_state.brygady:
         for s in slots:
             all_slots.append({
                 "Brygada":b,"Dzień":d_str,"Klient":s["client"],
-                "Typ":s["slot_type"],"Preferencja":s.get("pref_range",""),
+                "Typ":s["slot_type"],"Wybrany slot":s.get("pref_range",""),
                 "Start":s["start"],"Koniec":s["end"],"Czas [min]":s["duration_min"]
             })
 df=pd.DataFrame(all_slots)
@@ -266,7 +266,7 @@ st.dataframe(df)
 # ===================== GANTT =====================
 if not df.empty:
     st.subheader("📊 Wykres Gantta - tydzień")
-    fig=px.timeline(df,x_start="Start",x_end="Koniec",y="Brygada",color="Klient",hover_data=["Typ","Preferencja"])
+    fig=px.timeline(df,x_start="Start",x_end="Koniec",y="Brygada",color="Klient",hover_data=["Typ","Wybrany slot"])
     fig.update_yaxes(autorange="reversed")
     # rysowanie predefiniowanych slotów dla każdego dnia tygodnia
     for d in week_days:
